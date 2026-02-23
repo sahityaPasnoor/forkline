@@ -1,0 +1,66 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+:root {
+  --vp-font-family-base: 'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif;
+  --vp-font-family-mono: 'JetBrains Mono', 'SFMono-Regular', Menlo, monospace;
+
+  --vp-c-brand-1: #0f766e;
+  --vp-c-brand-2: #0d9488;
+  --vp-c-brand-3: #14b8a6;
+  --vp-c-brand-soft: rgba(15, 118, 110, 0.16);
+
+  --vp-c-bg: #f8fbfb;
+  --vp-c-bg-alt: #eef6f5;
+  --vp-c-bg-soft: #e6f0ef;
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #0f172a 15%, #0f766e 45%, #0d9488 80%);
+  --vp-home-hero-image-background-image: radial-gradient(circle at 30% 40%, rgba(15, 118, 110, 0.42), rgba(30, 64, 175, 0.15));
+  --vp-home-hero-image-filter: blur(54px);
+}
+
+html,
+body {
+  background:
+    radial-gradient(circle at 12% 10%, rgba(15, 118, 110, 0.1), transparent 40%),
+    radial-gradient(circle at 88% 4%, rgba(14, 116, 144, 0.12), transparent 42%),
+    var(--vp-c-bg);
+}
+
+.VPHero .image-bg {
+  border-radius: 999px;
+}
+
+.VPButton.brand {
+  box-shadow: 0 9px 24px rgba(15, 118, 110, 0.25);
+}
+
+.VPFeature {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: linear-gradient(155deg, rgba(255, 255, 255, 0.95), rgba(238, 246, 245, 0.95));
+}
+
+.vp-doc h2 {
+  border-top: 1px solid rgba(15, 23, 42, 0.1);
+  padding-top: 20px;
+}
+
+.vp-doc table {
+  display: table;
+  width: 100%;
+}
+
+.vp-doc tr:nth-child(2n) {
+  background: rgba(15, 118, 110, 0.04);
+}
+
+.VPNavBar {
+  backdrop-filter: blur(8px);
+  background-color: rgba(248, 251, 251, 0.8);
+}
+
+@media (max-width: 768px) {
+  .VPHero .container {
+    padding-top: 12px;
+  }
+}
