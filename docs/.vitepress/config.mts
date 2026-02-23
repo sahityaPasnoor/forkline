@@ -1,10 +1,8 @@
-import { defineConfig } from 'vitepress';
-
 const repository = process.env.GITHUB_REPOSITORY?.split('/')[1] ?? '';
 const isUserOrOrgSite = repository.endsWith('.github.io');
 const base = process.env.DOCS_BASE || (repository ? (isUserOrOrgSite ? '/' : `/${repository}/`) : '/');
 
-export default defineConfig({
+export default {
   title: 'Forkline',
   description: 'Local-first orchestration platform for running coding agents in isolated Git worktrees.',
   lang: 'en-US',
@@ -101,4 +99,4 @@ export default defineConfig({
   markdown: {
     lineNumbers: true
   }
-});
+};
