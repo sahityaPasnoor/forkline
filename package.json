@@ -4,6 +4,14 @@
   "version": "1.0.0",
   "description": "Forkline is a local-first desktop IDE for orchestrating multiple CLI coding agents across isolated git worktrees.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sahityaPasnoor/forkline.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sahityaPasnoor/forkline/issues"
+  },
+  "homepage": "https://github.com/sahityaPasnoor/forkline#readme",
   "publishConfig": {
     "access": "public"
   },
