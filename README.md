@@ -54,11 +54,13 @@ npm run dev
 
 This starts:
 
-- Vite dev server on `http://localhost:5555`
+- Vite dev server defaults to `http://localhost:5555` (auto-falls back to next free port)
 - Electron main/watch processes
-- Local control server on `127.0.0.1:34567` (inside Electron)
+- Local control server on `127.0.0.1:34567` (inside Electron, auto-falls back to next free port if occupied)
 
 ### Run Core + TUI + GUI
+
+From a source checkout:
 
 ```bash
 # Core daemon
@@ -77,7 +79,7 @@ Defaults:
 
 ### Run via CLI
 
-If published to npm, users can launch Forkline with:
+If published to npm, users can launch GUI with:
 
 ```bash
 npx forkline@latest
@@ -88,6 +90,13 @@ Or install globally:
 ```bash
 npm i -g forkline
 forkline
+```
+
+For terminal-first commands from the published package:
+
+```bash
+forkline-core
+forkline-tui
 ```
 
 If Electron is not bundled in the installed package, the launcher falls back to

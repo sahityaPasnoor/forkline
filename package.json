@@ -17,11 +17,14 @@
   },
   "main": "dist/electron/main.js",
   "bin": {
-    "forkline": "bin/forkline.js"
+    "forkline": "bin/forkline.js",
+    "forkline-core": "packages/core/bin/forkline-core.js",
+    "forkline-tui": "packages/tui/bin/forkline-tui.js"
   },
   "files": [
     "dist/**/*",
     "bin/**/*",
+    "packages/**/*",
     "LICENSE",
     "README.md",
     "package.json"
