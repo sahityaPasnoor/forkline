@@ -1,6 +1,6 @@
 # Forkline
 
-Forkline is a local-first desktop IDE for orchestrating multiple terminal-based coding agents in parallel, each isolated in its own git worktree.
+Forkline is a local-first desktop app for orchestrating multiple terminal-based coding agents in parallel, each isolated in its own git worktree.
 
 ## Why Forkline
 
