@@ -29,8 +29,11 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         ? defaultCommand 
         : (availableAgents[0]?.command || 'claude');
       setLocalCmd(validCommand);
+      setLocalCtx(context);
+      setLocalEnv(envVars);
+      setLocalMcp(mcpServers);
     }
-  }, [isOpen, defaultCommand, availableAgents]);
+  }, [isOpen, defaultCommand, availableAgents, context, envVars, mcpServers]);
 
   if (!isOpen) return null;
 
@@ -69,17 +72,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           <div>
-            <h3 className="text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Model Context Protocol (MCP)</h3>
-            <p className="text-xs text-[#888888] mb-3">Provide the JSON configuration for MCP servers. This config will be saved to an `mcp.json` file inside the worktree.</p>
-            <textarea 
-              value={localMcp}
-              onChange={(e) => setLocalMcp(e.target.value)}
-              placeholder='{\n  "mcpServers": {\n    "github": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-github"]\n    }\n  }\n}'
-              className="w-full h-32 input-stealth rounded p-3 text-xs font-mono"
-            />
-          </div>
-
-          <div>
             <h3 className="text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Shared Project Memory (Context)</h3>
             <p className="text-xs text-[#888888] mb-3">Instructions placed here will be automatically injected into every new Agent terminal session.</p>
             <textarea 
@@ -90,16 +82,35 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             />
           </div>
 
-          <div>
-            <h3 className="text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Environment Variables (Secrets)</h3>
-            <p className="text-xs text-[#888888] mb-3">Define securely injected variables (Format: KEY=VALUE, one per line). These are NOT saved to disk.</p>
-            <textarea 
-              value={localEnv}
-              onChange={(e) => setLocalEnv(e.target.value)}
-              placeholder="ANTHROPIC_API_KEY=sk-...\nOPENAI_API_KEY=sk-..."
-              className="w-full h-24 input-stealth rounded p-3 text-xs font-mono"
-            />
-          </div>
+          <details className="border border-[#1a1a1a] rounded-lg p-3">
+            <summary className="text-[11px] uppercase tracking-[0.18em] text-[#9ca3af] font-mono cursor-pointer">
+              Advanced
+            </summary>
+
+            <div className="mt-4 space-y-6">
+              <div>
+                <h3 className="text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Environment Variables (Secrets)</h3>
+                <p className="text-xs text-[#888888] mb-3">Define securely injected variables (Format: KEY=VALUE, one per line). These are NOT saved to disk.</p>
+                <textarea
+                  value={localEnv}
+                  onChange={(e) => setLocalEnv(e.target.value)}
+                  placeholder="ANTHROPIC_API_KEY=sk-...\nOPENAI_API_KEY=sk-..."
+                  className="w-full h-24 input-stealth rounded p-3 text-xs font-mono"
+                />
+              </div>
+
+              <div>
+                <h3 className="text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Model Context Protocol (MCP)</h3>
+                <p className="text-xs text-[#888888] mb-3">Provide JSON config for MCP servers. It is written as `mcp.json` in each task worktree.</p>
+                <textarea
+                  value={localMcp}
+                  onChange={(e) => setLocalMcp(e.target.value)}
+                  placeholder='{\n  "mcpServers": {\n    "github": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-github"]\n    }\n  }\n}'
+                  className="w-full h-32 input-stealth rounded p-3 text-xs font-mono"
+                />
+              </div>
+            </div>
+          </details>
         </div>
 
         <div className="p-5 border-t border-[#1a1a1a] flex justify-end bg-[#050505]">

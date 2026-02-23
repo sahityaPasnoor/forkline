@@ -1,129 +1,78 @@
-import simpleGit from 'simple-git';
-import path from 'path';
-import fs from 'fs';
 import { ipcMain } from 'electron';
 
+// Shared core engine implementation.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { GitService } = require('../../packages/core/src/services/git-service');
+
+type GitServiceInstance = {
+  validateSource: (sourcePath: string) => Promise<Record<string, unknown>>;
+  createWorktree: (basePath: string, taskName: string) => Promise<Record<string, unknown>>;
+  listWorktrees: (basePath: string) => Promise<Record<string, unknown>>;
+  getDiff: (worktreePath: string) => Promise<Record<string, unknown>>;
+  getModifiedFiles: (worktreePath: string) => Promise<Record<string, unknown>>;
+  removeWorktree: (basePath: string, taskName: string, worktreePath: string, force: boolean) => Promise<Record<string, unknown>>;
+  mergeWorktree: (basePath: string, taskName: string, worktreePath: string) => Promise<Record<string, unknown>>;
+};
+
 export class GitManager {
+  private gitService: GitServiceInstance;
+
   constructor() {
+    this.gitService = new GitService();
+
     ipcMain.handle('git:validateSource', async (event, { sourcePath }) => {
       try {
-        if (!fs.existsSync(sourcePath)) {
-          return { valid: false, error: 'Path does not exist' };
-        }
-        const stat = fs.statSync(sourcePath);
-        if (!stat.isDirectory()) {
-          return { valid: false, error: 'Path is not a directory' };
-        }
-        const git = simpleGit(sourcePath);
-        const isRepo = await git.checkIsRepo();
-        return { valid: true, isRepo, type: isRepo ? 'Git Repository' : 'Local Directory' };
+        return await this.gitService.validateSource(sourcePath);
       } catch (error: any) {
-        return { valid: false, error: error.message };
+        return { valid: false, error: error?.message || String(error) };
       }
     });
 
     ipcMain.handle('git:createWorktree', async (event, { basePath, taskName }) => {
       try {
-        const git = simpleGit(basePath);
-        
-        const isRepo = await git.checkIsRepo();
-        if (!isRepo) {
-          await git.init();
-          await git.add('.');
-          try {
-            await git.commit('Initial framework commit by Multi-Agent App');
-          } catch (e) {
-            // Ignore if nothing to commit
-          }
-        }
-
-        const worktreesPath = path.join(path.dirname(basePath), `${path.basename(basePath)}-worktrees`);
-        if (!fs.existsSync(worktreesPath)) {
-          fs.mkdirSync(worktreesPath, { recursive: true });
-        }
-
-        const targetPath = path.join(worktreesPath, taskName);
-        
-        const branches = await git.branchLocal();
-        if (branches.all.includes(taskName)) {
-           await git.raw(['worktree', 'add', targetPath, taskName]);
-        } else {
-           await git.raw(['worktree', 'add', '-b', taskName, targetPath]);
-        }
-        
-        return { success: true, worktreePath: targetPath };
+        return await this.gitService.createWorktree(basePath, taskName);
       } catch (error: any) {
-        return { success: false, error: error.message };
+        return { success: false, error: error?.message || String(error) };
+      }
+    });
+
+    ipcMain.handle('git:listWorktrees', async (event, { basePath }) => {
+      try {
+        return await this.gitService.listWorktrees(basePath);
+      } catch (error: any) {
+        return { success: false, error: error?.message || String(error) };
       }
     });
 
     ipcMain.handle('git:getDiff', async (event, { worktreePath }) => {
       try {
-        const git = simpleGit(worktreePath);
-        // Stage everything to get a comprehensive diff including new files
-        await git.add('.');
-        const diff = await git.diff(['--cached']);
-        // Unstage to avoid forcing commits if user doesn't want to
-        await git.reset(['HEAD']); 
-        return { success: true, diff };
+        return await this.gitService.getDiff(worktreePath);
       } catch (error: any) {
-        return { success: false, error: error.message };
+        return { success: false, error: error?.message || String(error) };
       }
     });
 
     ipcMain.handle('git:getModifiedFiles', async (event, { worktreePath }) => {
       try {
-        if (!fs.existsSync(worktreePath)) return { success: true, files: [] };
-        const git = simpleGit(worktreePath);
-        const status = await git.status();
-        return { success: true, files: status.files.map(f => f.path) };
+        return await this.gitService.getModifiedFiles(worktreePath);
       } catch (error: any) {
-        return { success: false, error: error.message };
+        return { success: false, error: error?.message || String(error), files: [] };
       }
     });
 
     ipcMain.handle('git:removeWorktree', async (event, { basePath, taskName, worktreePath, force }) => {
       try {
-        const git = simpleGit(basePath);
-        
-        // Remove worktree
-        if (force) {
-          await git.raw(['worktree', 'remove', '-f', worktreePath]);
-        } else {
-          await git.raw(['worktree', 'remove', worktreePath]);
-        }
-
-        // Delete the branch
-        await git.branch(['-D', taskName]);
-
-        return { success: true };
+        return await this.gitService.removeWorktree(basePath, taskName, worktreePath, force);
       } catch (error: any) {
-        return { success: false, error: error.message };
+        return { success: false, error: error?.message || String(error) };
       }
     });
 
     ipcMain.handle('git:mergeWorktree', async (event, { basePath, taskName, worktreePath }) => {
       try {
-        const gitBase = simpleGit(basePath);
-        const gitWorktree = simpleGit(worktreePath);
-
-        // Commit any pending changes in the worktree
-        const status = await gitWorktree.status();
-        if (!status.isClean()) {
-           await gitWorktree.add('.');
-           await gitWorktree.commit(`Automated commit from agent task: ${taskName}`);
-        }
-
-        // Merge into base branch (assuming base is currently checked out in basePath)
-        await gitBase.merge([taskName]);
-
-        // Clean up
-        await gitBase.raw(['worktree', 'remove', '-f', worktreePath]);
-        await gitBase.branch(['-d', taskName]);
-
-        return { success: true };
+        return await this.gitService.mergeWorktree(basePath, taskName, worktreePath);
       } catch (error: any) {
-        return { success: false, error: error.message };
+        return { success: false, error: error?.message || String(error) };
       }
     });
   }

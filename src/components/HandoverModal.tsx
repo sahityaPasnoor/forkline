@@ -43,7 +43,7 @@ const HandoverModal: React.FC<HandoverModalProps> = ({ isOpen, onClose, onSubmit
         </div>
         
         <form onSubmit={handleSubmit} className="p-6 space-y-5 bg-[#000000]">
-          <p className="text-xs text-[#888888] mb-2 leading-relaxed">This will interrupt the current agent and spawn a new one in the exact same isolated Git worktree.</p>
+          <p className="text-xs text-[#888888] mb-2 leading-relaxed">Switch agent in the same worktree. Current session receives `SIGINT` first.</p>
           <div>
             <label className="block text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">New Agent</label>
             <select 
@@ -61,11 +61,11 @@ const HandoverModal: React.FC<HandoverModalProps> = ({ isOpen, onClose, onSubmit
           </div>
 
           <div>
-            <label className="block text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Handover Prompt</label>
+            <label className="block text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Instruction</label>
             <textarea 
               value={prompt}
               onChange={e => setPrompt(e.target.value)}
-              placeholder="e.g. Review the previous agent's code and fix the recursion error..."
+              placeholder="Continue the task and state what to do next."
               className="w-full h-24 input-stealth rounded p-3 text-xs"
               required
             />
@@ -74,7 +74,7 @@ const HandoverModal: React.FC<HandoverModalProps> = ({ isOpen, onClose, onSubmit
           <div className="pt-2 flex justify-end space-x-3">
             <button type="button" onClick={onClose} className="px-4 py-2 text-xs font-bold btn-ghost rounded">Cancel</button>
             <button type="submit" className="px-5 py-2 btn-primary rounded text-xs uppercase tracking-wider flex items-center">
-              Execute Handover
+              Handover
             </button>
           </div>
         </form>

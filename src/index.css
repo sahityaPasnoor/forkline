@@ -2,14 +2,27 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
 @layer base {
   body {
     background-color: #000000;
     color: #e5e5e5;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-family: var(--font-ui);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     overflow: hidden;
+    text-rendering: optimizeLegibility;
+    letter-spacing: 0.01em;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: var(--font-mono);
   }
 }
 
@@ -80,8 +93,12 @@
 .xterm-viewport {
   background-color: #000000 !important;
 }
-.xterm-screen {
-  padding: 16px 8px;
+
+.xterm,
+.xterm * {
+  font-family: var(--font-mono) !important;
+  font-variant-ligatures: none;
+  letter-spacing: 0;
 }
 
 /* Utility for text gradients */

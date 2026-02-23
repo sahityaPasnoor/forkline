@@ -1,0 +1,8 @@
+{
+  "name": "@forkline/gui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Forkline GUI client boundary (Electron/React).",
+  "main": "README.md",
+  "license": "MIT"
+}

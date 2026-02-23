@@ -1,0 +1,14 @@
+{
+  "name": "@forkline/tui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Forkline terminal UI client for forkline-core.",
+  "main": "src/index.js",
+  "bin": {
+    "forkline-tui": "bin/forkline-tui.js"
+  },
+  "scripts": {
+    "start": "node bin/forkline-tui.js"
+  },
+  "license": "MIT"
+}

@@ -5,28 +5,70 @@ declare global {
     electronAPI: {
       openDirectoryDialog: () => Promise<string | null>;
       getDefaultPath: () => Promise<string>;
+      getControlBaseUrl: () => Promise<string>;
+      getControlAuthToken: () => Promise<string>;
       detectAgents: () => Promise<{name: string, command: string, version: string}[]>;
+      prepareAgentWorkspace: (
+        worktreePath: string,
+        context: string,
+        mcpServers: string,
+        apiDoc: string
+      ) => Promise<{success: boolean, error?: string}>;
       saveImage: (worktreePath: string, imageBase64: string, filename: string) => Promise<{success: boolean, path?: string, error?: string}>;
       validateSource: (sourcePath: string) => Promise<{valid: boolean, isRepo?: boolean, type?: string, error?: string}>;
       createWorktree: (basePath: string, taskName: string) => Promise<{success: boolean, worktreePath?: string, error?: string}>;
+      listWorktrees: (basePath: string) => Promise<{
+        success: boolean;
+        worktrees?: Array<{ path: string; branchRef?: string; branchName?: string | null }>;
+        error?: string;
+      }>;
       getDiff: (worktreePath: string) => Promise<{success: boolean, diff?: string, error?: string}>;
       getModifiedFiles: (worktreePath: string) => Promise<{success: boolean, files?: string[], error?: string}>;
       removeWorktree: (basePath: string, taskName: string, worktreePath: string, force: boolean) => Promise<{success: boolean, error?: string}>;
       mergeWorktree: (basePath: string, taskName: string, worktreePath: string) => Promise<{success: boolean, error?: string}>;
       saveStore: (data: any) => Promise<{success: boolean, error?: string}>;
       loadStore: () => Promise<{success: boolean, data: any, error?: string}>;
+      saveRuntimeSession: (data: any) => Promise<{success: boolean, error?: string}>;
+      loadRuntimeSession: () => Promise<{success: boolean, data: any, error?: string}>;
+      fleetTrackTask: (payload: any) => Promise<{success: boolean, error?: string}>;
+      fleetRecordEvent: (taskId: string, eventType: string, payload?: Record<string, unknown>) => Promise<{success: boolean, error?: string}>;
+      fleetMarkClosed: (taskId: string, closeAction: string) => Promise<{success: boolean, error?: string}>;
+      fleetSetArchived: (taskId: string, archived: boolean) => Promise<{success: boolean, error?: string}>;
+      fleetListOverview: () => Promise<{success: boolean, overview?: any, error?: string}>;
+      fleetListProjects: () => Promise<{success: boolean, projects?: any[], error?: string}>;
+      fleetListTasks: (options?: any) => Promise<{success: boolean, tasks?: any[], error?: string}>;
+      fleetGetTaskTimeline: (taskId: string) => Promise<{success: boolean, timeline?: any, error?: string}>;
       createPty: (taskId: string, cwd?: string, customEnv?: Record<string, string>) => void;
       writePty: (taskId: string, data: string) => void;
       resizePty: (taskId: string, cols: number, rows: number) => void;
+      detachPty: (taskId: string) => void;
       destroyPty: (taskId: string) => void;
-      onPtyData: (taskId: string, callback: (data: string) => void) => void;
+      listPtySessions: () => Promise<{
+        success: boolean;
+        sessions?: Array<{
+          taskId: string;
+          cwd: string;
+          running: boolean;
+          isBlocked: boolean;
+          subscribers: number;
+          createdAt: number;
+          lastActivityAt: number;
+          exitCode: number | null;
+          signal?: number;
+          bufferSize: number;
+        }>;
+      }>;
+      onPtyData: (taskId: string, callback: (data: string) => void) => () => void;
+      onPtyState: (taskId: string, callback: (data: {taskId: string, created: boolean, running: boolean}) => void) => () => void;
+      onPtyExit: (taskId: string, callback: (data: {taskId: string, exitCode: number | null, signal?: number}) => void) => () => void;
       removePtyDataListener: (taskId: string) => void;
-      onAgentRequest: (callback: (req: {requestId: string, taskId: string, action: string, payload: any}) => void) => void;
+      onAgentRequest: (callback: (req: {requestId: string, taskId: string, action: string, payload: any}) => void) => () => void;
       respondToAgent: (requestId: string, statusCode: number, data: any) => void;
-      onAgentTodos: (callback: (req: {taskId: string, payload: any}) => void) => void;
-      onAgentMessage: (callback: (req: {taskId: string, payload: any}) => void) => void;
-      onAgentBlocked: (callback: (data: {taskId: string, isBlocked: boolean}) => void) => void;
-      onGlobalShortcutNewTask?: (callback: () => void) => void;
+      onAgentTodos: (callback: (req: {taskId: string, payload: any}) => void) => () => void;
+      onAgentMessage: (callback: (req: {taskId: string, payload: any}) => void) => () => void;
+      onAgentUsage: (callback: (req: {taskId: string, payload: any}) => void) => () => void;
+      onAgentBlocked: (callback: (data: {taskId: string, isBlocked: boolean, reason?: string}) => void) => () => void;
+      onGlobalShortcutNewTask: (callback: () => void) => () => void;
     };
   }
 }

@@ -1,0 +1,8 @@
+{
+  "name": "@forkline/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared API/event contract for Forkline core, tui, and gui.",
+  "main": "src/index.js",
+  "license": "MIT"
+}

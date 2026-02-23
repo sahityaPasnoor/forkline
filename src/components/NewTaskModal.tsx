@@ -15,6 +15,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSubmit, 
   const [command, setCommand] = useState(defaultCommand);
   const [prompt, setPrompt] = useState('');
   const [autoMerge, setAutoMerge] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -24,23 +25,30 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSubmit, 
         ? defaultCommand 
         : (availableAgents[0]?.command || 'claude');
       setCommand(validCommand);
+      setIsStarting(false);
     }
   }, [isOpen, projectName, defaultCommand, availableAgents]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    onSubmit(taskName, command, prompt, { autoMerge });
+  const startSession = (selectedCommand: string) => {
+    if (!taskName.trim() || isStarting) return;
+    setIsStarting(true);
+    onSubmit(taskName, selectedCommand, prompt, { autoMerge });
     setPrompt('');
     onClose();
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    startSession(command);
   };
 
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
       <div className="app-panel rounded-xl shadow-2xl w-full max-w-lg overflow-hidden border border-[#1a1a1a]">
         <div className="flex justify-between items-center p-4 border-b border-[#1a1a1a] bg-[#050505]">
-          <h2 className="text-sm font-bold text-[#e5e5e5] uppercase tracking-widest">Spawn Node</h2>
+          <h2 className="text-sm font-bold text-[#e5e5e5] uppercase tracking-widest">Spawn Agent</h2>
           <button onClick={onClose} className="text-[#525252] hover:text-white transition-colors"><X size={18} /></button>
         </div>
         
@@ -83,24 +91,27 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSubmit, 
             />
           </div>
 
-          <div className="border-t border-[#1a1a1a] pt-5">
-            <label className="flex items-center space-x-3 cursor-pointer group">
-              <input 
-                type="checkbox" 
-                checked={autoMerge} 
+          <details className="border-t border-[#1a1a1a] pt-4">
+            <summary className="text-[11px] uppercase tracking-[0.16em] text-[#9ca3af] font-mono cursor-pointer">
+              Advanced
+            </summary>
+            <label className="mt-3 flex items-center space-x-3 cursor-pointer group">
+              <input
+                type="checkbox"
+                checked={autoMerge}
                 onChange={e => setAutoMerge(e.target.checked)}
                 className="appearance-none w-4 h-4 rounded-sm border border-[#262626] bg-[#0a0a0a] checked:bg-white checked:border-white transition-colors"
               />
               <div>
-                <span className="text-xs font-medium text-[#a3a3a3] group-hover:text-white transition-colors">Grant Auto-Merge Permission</span>
+                <span className="text-xs font-medium text-[#a3a3a3] group-hover:text-white transition-colors">Allow auto-merge for this task</span>
               </div>
             </label>
-          </div>
+          </details>
 
           <div className="pt-2 flex justify-end space-x-3">
             <button type="button" onClick={onClose} className="px-4 py-2 text-xs font-bold btn-ghost rounded">Cancel</button>
-            <button type="submit" className="px-5 py-2 btn-primary rounded text-xs uppercase tracking-wider flex items-center">
-              <Play size={14} className="mr-2" /> Execute
+            <button type="submit" disabled={isStarting} className="px-5 py-2 btn-primary rounded text-xs uppercase tracking-wider flex items-center disabled:opacity-60">
+              <Play size={14} className="mr-2" /> Spawn
             </button>
           </div>
         </form>

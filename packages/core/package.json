@@ -1,0 +1,14 @@
+{
+  "name": "@forkline/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Forkline core daemon (PTY, worktrees, task orchestration).",
+  "main": "src/index.js",
+  "bin": {
+    "forkline-core": "bin/forkline-core.js"
+  },
+  "scripts": {
+    "start": "node bin/forkline-core.js"
+  },
+  "license": "MIT"
+}

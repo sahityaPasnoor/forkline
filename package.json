@@ -1,11 +1,44 @@
 {
-  "name": "multiagentapp",
+  "name": "forkline",
+  "productName": "Forkline",
   "version": "1.0.0",
+  "description": "Forkline is a local-first desktop IDE for orchestrating multiple CLI coding agents across isolated git worktrees.",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "main": "dist/electron/main.js",
+  "bin": {
+    "forkline": "bin/forkline.js"
+  },
+  "files": [
+    "dist/**/*",
+    "bin/**/*",
+    "LICENSE",
+    "README.md",
+    "package.json"
+  ],
   "scripts": {
-    "dev": "concurrently \"vite\" \"wait-on tcp:5177 && tsc -p tsconfig.electron.json && electron .\"",
-    "build": "tsc -p tsconfig.electron.json && vite build",
-    "start": "electron ."
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "typecheck:web": "tsc -p tsconfig.json --noEmit",
+    "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit",
+    "typecheck": "npm run typecheck:web && npm run typecheck:electron",
+    "dev": "node scripts/run-dev.js",
+    "dev:internal": "concurrently -k \"vite\" \"npm:dev:electron:watch\" \"npm:dev:electron:run\"",
+    "dev:electron:watch": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "dev:electron:run": "node scripts/run-electron-dev.js",
+    "core:start": "node packages/core/bin/forkline-core.js",
+    "tui:start": "node packages/tui/bin/forkline-tui.js",
+    "gui:start": "npm run dev",
+    "build": "vite build && npm run build:electron",
+    "start": "npm run build && electron .",
+    "pack": "npx -y electron-builder@24.13.3 --dir --publish never",
+    "dist:local": "npm run build && npx -y electron-builder@24.13.3 --publish never",
+    "release": "npm run build && npx -y electron-builder@24.13.3 --publish always",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
@@ -14,10 +47,12 @@
     "node-pty": "^1.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "simple-git": "^3.24.0"
+    "simple-git": "^3.24.0",
+    "sql.js": "^1.14.0"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.3",
+    "@playwright/test": "^1.58.2",
     "@types/node": "^20.12.7",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.0",
@@ -30,5 +65,42 @@
     "typescript": "^5.4.5",
     "vite": "^5.2.11",
     "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.forkline.app",
+    "productName": "Forkline",
+    "asar": true,
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    },
+    "publish": [
+      {
+        "provider": "github"
+      }
+    ]
   }
 }
