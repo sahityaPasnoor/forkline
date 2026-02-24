@@ -6,9 +6,23 @@ const { GitService } = require('../../packages/core/src/services/git-service');
 
 type GitServiceInstance = {
   validateSource: (sourcePath: string) => Promise<Record<string, unknown>>;
-  createWorktree: (basePath: string, taskName: string) => Promise<Record<string, unknown>>;
+  createWorktree: (
+    basePath: string,
+    taskName: string,
+    baseBranch?: string,
+    options?: {
+      createBaseBranchIfMissing?: boolean;
+      dependencyCloneMode?: 'copy_on_write' | 'full_copy';
+      packageStoreStrategy?: string;
+      pnpmStorePath?: string;
+      sharedCacheRoot?: string;
+      pnpmAutoInstall?: boolean;
+    }
+  ) => Promise<Record<string, unknown>>;
   listWorktrees: (basePath: string) => Promise<Record<string, unknown>>;
-  getDiff: (worktreePath: string) => Promise<Record<string, unknown>>;
+  getWorkspaceInfo: (basePath: string) => Promise<Record<string, unknown>>;
+  listBranches: (basePath: string) => Promise<Record<string, unknown>>;
+  getDiff: (worktreePath: string, options?: { syntaxAware?: boolean }) => Promise<Record<string, unknown>>;
   getModifiedFiles: (worktreePath: string) => Promise<Record<string, unknown>>;
   removeWorktree: (basePath: string, taskName: string, worktreePath: string, force: boolean) => Promise<Record<string, unknown>>;
   mergeWorktree: (basePath: string, taskName: string, worktreePath: string) => Promise<Record<string, unknown>>;
@@ -28,9 +42,9 @@ export class GitManager {
       }
     });
 
-    ipcMain.handle('git:createWorktree', async (event, { basePath, taskName }) => {
+    ipcMain.handle('git:createWorktree', async (event, { basePath, taskName, baseBranch, options }) => {
       try {
-        return await this.gitService.createWorktree(basePath, taskName);
+        return await this.gitService.createWorktree(basePath, taskName, baseBranch, options);
       } catch (error: any) {
         return { success: false, error: error?.message || String(error) };
       }
@@ -44,9 +58,25 @@ export class GitManager {
       }
     });
 
-    ipcMain.handle('git:getDiff', async (event, { worktreePath }) => {
+    ipcMain.handle('git:getWorkspaceInfo', async (event, { basePath }) => {
       try {
-        return await this.gitService.getDiff(worktreePath);
+        return await this.gitService.getWorkspaceInfo(basePath);
+      } catch (error: any) {
+        return { success: false, error: error?.message || String(error) };
+      }
+    });
+
+    ipcMain.handle('git:listBranches', async (event, { basePath }) => {
+      try {
+        return await this.gitService.listBranches(basePath);
+      } catch (error: any) {
+        return { success: false, error: error?.message || String(error), branches: [] };
+      }
+    });
+
+    ipcMain.handle('git:getDiff', async (event, { worktreePath, options }) => {
+      try {
+        return await this.gitService.getDiff(worktreePath, options);
       } catch (error: any) {
         return { success: false, error: error?.message || String(error) };
       }

@@ -6,6 +6,9 @@ import type {
   AgentCapabilities,
   AgentInfo,
   AgentTodo,
+  LivingSpecCandidate,
+  LivingSpecPreference,
+  LivingSpecSelectionPrompt,
   PendingApprovalRequest,
   ProjectPermissionPolicy,
   SourceStatus,
@@ -32,6 +35,8 @@ interface CreateTaskInput {
   rawTaskName: string;
   agentCommand: string;
   prompt: string;
+  baseBranch?: string;
+  createBaseBranchIfMissing?: boolean;
   capabilities: AgentCapabilities;
   parentTaskId?: string;
   activate?: boolean;
@@ -47,6 +52,11 @@ interface SplitTaskInput {
 interface CreateTaskResult {
   success: boolean;
   taskId?: string;
+  error?: string;
+}
+
+interface LivingSpecGuardResult {
+  success: boolean;
   error?: string;
 }
 
@@ -216,6 +226,28 @@ const sanitizeProjectPermissions = (value: unknown): Record<string, ProjectPermi
   return map;
 };
 
+const normalizeRelativePath = (value: string) => value.trim().replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/\/+/g, '/');
+
+const sanitizeLivingSpecPreferences = (value: unknown): Record<string, LivingSpecPreference> => {
+  if (!value || typeof value !== 'object') return {};
+  const map: Record<string, LivingSpecPreference> = {};
+  for (const [rawProjectPath, rawPreference] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedPath = normalizeProjectPath(rawProjectPath);
+    if (!normalizedPath || !rawPreference || typeof rawPreference !== 'object') continue;
+    const preference = rawPreference as Record<string, unknown>;
+    const mode = preference.mode === 'consolidated' ? 'consolidated' : (preference.mode === 'single' ? 'single' : null);
+    if (!mode) continue;
+    if (mode === 'single') {
+      const selectedPathRaw = typeof preference.selectedPath === 'string' ? normalizeRelativePath(preference.selectedPath) : '';
+      if (!selectedPathRaw || selectedPathRaw.startsWith('/') || selectedPathRaw.includes('..')) continue;
+      map[normalizedPath] = { mode: 'single', selectedPath: selectedPathRaw };
+      continue;
+    }
+    map[normalizedPath] = { mode: 'consolidated' };
+  }
+  return map;
+};
+
 const inferWorktreeName = (worktreePath: string) => {
   const normalized = worktreePath.replace(/\\/g, '/').replace(/\/+$/, '');
   const last = normalized.split('/').pop();
@@ -264,6 +296,8 @@ const sanitizeTaskTabs = (value: unknown, basePathFallback: string, defaultComma
   return tabs;
 };
 
+const buildRestoredTaskId = () => `restored-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
 export const useOrchestrator = () => {
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [tabs, setTabs] = useState<TaskTab[]>([]);
@@ -279,6 +313,14 @@ export const useOrchestrator = () => {
   const [envVars, setEnvVars] = useState('');
   const [defaultCommand, setDefaultCommand] = useState('claude');
   const [mcpServers, setMcpServers] = useState('');
+  const [mcpEnabled, setMcpEnabled] = useState(true);
+  const [packageStoreStrategy, setPackageStoreStrategy] = useState<'off' | 'pnpm_global' | 'polyglot_global'>('off');
+  const [dependencyCloneMode, setDependencyCloneMode] = useState<'copy_on_write' | 'full_copy'>('copy_on_write');
+  const [pnpmStorePath, setPnpmStorePath] = useState('');
+  const [sharedCacheRoot, setSharedCacheRoot] = useState('');
+  const [pnpmAutoInstall, setPnpmAutoInstall] = useState(false);
+  const [sandboxMode, setSandboxMode] = useState<'off' | 'auto' | 'seatbelt' | 'firejail'>('off');
+  const [networkGuard, setNetworkGuard] = useState<'off' | 'none'>('off');
   const [availableAgents, setAvailableAgents] = useState<AgentInfo[]>([]);
 
   const [taskStatuses, setTaskStatuses] = useState<Record<string, TaskStatus>>({});
@@ -288,7 +330,11 @@ export const useOrchestrator = () => {
   const [pendingApprovals, setPendingApprovals] = useState<PendingApprovalQueueItem[]>([]);
   const [attentionEvents, setAttentionEvents] = useState<AttentionEvent[]>([]);
   const [projectPermissions, setProjectPermissions] = useState<Record<string, ProjectPermissionPolicy>>({});
+  const [livingSpecPreferences, setLivingSpecPreferences] = useState<Record<string, LivingSpecPreference>>({});
+  const [livingSpecCandidatesByProject, setLivingSpecCandidatesByProject] = useState<Record<string, LivingSpecCandidate[]>>({});
+  const [livingSpecSelectionPrompt, setLivingSpecSelectionPrompt] = useState<LivingSpecSelectionPrompt | null>(null);
   const projectPermissionsRef = useRef<Record<string, ProjectPermissionPolicy>>({});
+  const livingSpecPreferencesRef = useRef<Record<string, LivingSpecPreference>>({});
   const autoPromptLastResponseRef = useRef<Record<string, number>>({});
   const attentionDedupRef = useRef<Record<string, number>>({});
   const fleetSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -305,6 +351,10 @@ export const useOrchestrator = () => {
   useEffect(() => {
     projectPermissionsRef.current = projectPermissions;
   }, [projectPermissions]);
+
+  useEffect(() => {
+    livingSpecPreferencesRef.current = livingSpecPreferences;
+  }, [livingSpecPreferences]);
 
   const validatePath = useCallback(async (path: string) => {
     if (!path) {
@@ -339,6 +389,88 @@ export const useOrchestrator = () => {
       };
       return { ...prev, [normalizedPath]: nextPolicy };
     });
+  }, []);
+
+  const isLivingSpecPreferenceValid = useCallback((preference: LivingSpecPreference | undefined, candidates: LivingSpecCandidate[]) => {
+    if (!preference) return false;
+    if (candidates.length === 0) return true;
+    if (preference.mode === 'consolidated') return true;
+    if (!preference.selectedPath) return false;
+    const normalizedSelection = normalizeRelativePath(preference.selectedPath);
+    return candidates.some((candidate) => normalizeRelativePath(candidate.path) === normalizedSelection);
+  }, []);
+
+  const setProjectLivingSpecPreference = useCallback((projectPath: string, preference: LivingSpecPreference) => {
+    const normalizedPath = normalizeProjectPath(projectPath);
+    if (!normalizedPath) return;
+    setLivingSpecPreferences((prev) => ({ ...prev, [normalizedPath]: preference }));
+  }, []);
+
+  const detectLivingSpecCandidatesForProject = useCallback(async (projectPath: string): Promise<LivingSpecCandidate[]> => {
+    const normalizedPath = normalizeProjectPath(projectPath);
+    if (!normalizedPath) return [];
+    const response = await window.electronAPI.detectLivingSpecCandidates(normalizedPath);
+    if (!response.success || !Array.isArray(response.candidates)) {
+      setLivingSpecCandidatesByProject((prev) => ({ ...prev, [normalizedPath]: [] }));
+      return [];
+    }
+    const candidates = response.candidates
+      .filter((candidate) => candidate && typeof candidate.path === 'string' && candidate.path.trim())
+      .map((candidate) => ({
+        path: normalizeRelativePath(candidate.path),
+        kind: typeof candidate.kind === 'string' && candidate.kind.trim() ? candidate.kind.trim() : 'spec'
+      }))
+      .filter((candidate) => candidate.path && !candidate.path.startsWith('/') && !candidate.path.includes('..'));
+    setLivingSpecCandidatesByProject((prev) => ({ ...prev, [normalizedPath]: candidates }));
+    return candidates;
+  }, []);
+
+  const ensureLivingSpecSelection = useCallback(async (projectPath: string): Promise<LivingSpecGuardResult> => {
+    const normalizedPath = normalizeProjectPath(projectPath);
+    if (!normalizedPath) return { success: true };
+    const existingCandidates = livingSpecCandidatesByProject[normalizedPath];
+    const candidates = Array.isArray(existingCandidates)
+      ? existingCandidates
+      : await detectLivingSpecCandidatesForProject(normalizedPath);
+    if (candidates.length === 0) return { success: true };
+
+    const currentPreference = livingSpecPreferencesRef.current[normalizedPath];
+    if (isLivingSpecPreferenceValid(currentPreference, candidates)) {
+      return { success: true };
+    }
+
+    if (candidates.length === 1) {
+      setProjectLivingSpecPreference(normalizedPath, {
+        mode: 'single',
+        selectedPath: candidates[0].path
+      });
+      return { success: true };
+    }
+
+    setLivingSpecSelectionPrompt({ projectPath: normalizedPath, candidates });
+    return {
+      success: false,
+      error: 'Choose a Living Spec source file (or consolidate all) before spawning a new task.'
+    };
+  }, [detectLivingSpecCandidatesForProject, isLivingSpecPreferenceValid, livingSpecCandidatesByProject, setProjectLivingSpecPreference]);
+
+  const resolveLivingSpecSelectionPrompt = useCallback((preference: LivingSpecPreference) => {
+    const currentPrompt = livingSpecSelectionPrompt;
+    if (!currentPrompt) return;
+    if (preference.mode === 'single') {
+      const normalizedSelection = normalizeRelativePath(preference.selectedPath || '');
+      const isKnown = currentPrompt.candidates.some((candidate) => normalizeRelativePath(candidate.path) === normalizedSelection);
+      if (!isKnown) return;
+      setProjectLivingSpecPreference(currentPrompt.projectPath, { mode: 'single', selectedPath: normalizedSelection });
+      setLivingSpecSelectionPrompt(null);
+      return;
+    }
+    setProjectLivingSpecPreference(currentPrompt.projectPath, { mode: 'consolidated' });
+    setLivingSpecSelectionPrompt(null);
+  }, [livingSpecSelectionPrompt, setProjectLivingSpecPreference]);
+
+  const dismissLivingSpecSelectionPrompt = useCallback(() => {
+    setLivingSpecSelectionPrompt(null);
   }, []);
 
   const switchProject = useCallback((path: string) => {
@@ -498,12 +630,18 @@ export const useOrchestrator = () => {
     rawTaskName,
     agentCommand,
     prompt,
+    baseBranch,
+    createBaseBranchIfMissing,
     capabilities,
     parentTaskId,
     activate = true
   }: CreateTaskInput): Promise<CreateTaskResult> => {
     if (!basePath) {
       return { success: false, error: 'Base path is empty' };
+    }
+    const livingSpecGuard = await ensureLivingSpecSelection(basePath);
+    if (!livingSpecGuard.success) {
+      return { success: false, error: livingSpecGuard.error || 'Living Spec selection is required.' };
     }
 
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -529,7 +667,14 @@ export const useOrchestrator = () => {
     if (activate) setActiveTab(id);
 
     try {
-      const result = await window.electronAPI.createWorktree(basePath, taskName);
+      const result = await window.electronAPI.createWorktree(basePath, taskName, baseBranch, {
+        createBaseBranchIfMissing,
+        dependencyCloneMode,
+        packageStoreStrategy,
+        pnpmStorePath,
+        sharedCacheRoot,
+        pnpmAutoInstall
+      });
       if (result.success && result.worktreePath) {
         tabsRef.current = tabsRef.current.map(t => (t.id === id ? { ...t, worktreePath: result.worktreePath } : t));
         setTabs(tabsRef.current);
@@ -548,7 +693,7 @@ export const useOrchestrator = () => {
       removeTaskFromState(id);
       return { success: false, error: e.message };
     }
-  }, [basePath, removeTaskFromState]);
+  }, [basePath, dependencyCloneMode, ensureLivingSpecSelection, packageStoreStrategy, pnpmAutoInstall, pnpmStorePath, removeTaskFromState, sharedCacheRoot]);
 
   const markTaskBootstrapped = useCallback((taskId: string) => {
     let changed = false;
@@ -610,6 +755,41 @@ export const useOrchestrator = () => {
 
     return createdTaskIds;
   }, [createTask, selectTab]);
+
+  const restoreExistingWorktree = useCallback((projectPath: string, worktreePath: string, branchName?: string | null) => {
+    const normalizedProjectPath = normalizeProjectPath(projectPath);
+    const normalizedWorktreePath = normalizeProjectPath(worktreePath);
+    if (!normalizedProjectPath || !normalizedWorktreePath) return null;
+
+    const existing = tabsRef.current.find(tab => normalizeProjectPath(tab.worktreePath || '') === normalizedWorktreePath);
+    if (existing) {
+      selectTab(existing.id);
+      return existing.id;
+    }
+
+    const restoredTab: TaskTab = {
+      id: buildRestoredTaskId(),
+      name: (branchName && branchName.trim()) ? branchName.trim() : inferWorktreeName(normalizedWorktreePath),
+      agent: defaultCommand,
+      basePath: normalizedProjectPath,
+      worktreePath: normalizedWorktreePath,
+      capabilities: { autoMerge: false },
+      hasBootstrapped: true
+    };
+
+    const nextTabs = [...tabsRef.current, restoredTab];
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+    setActiveTab(restoredTab.id);
+    setBasePath(normalizedProjectPath);
+    setActiveTabByProject(prev => ({ ...prev, [normalizedProjectPath]: restoredTab.id }));
+    void validatePath(normalizedProjectPath);
+    void window.electronAPI.fleetRecordEvent(restoredTab.id, 'worktree_session_restored', {
+      basePath: normalizedProjectPath,
+      worktreePath: normalizedWorktreePath
+    });
+    return restoredTab.id;
+  }, [defaultCommand, selectTab, validatePath]);
 
   const approvePendingRequest = useCallback(async () => {
     if (!pendingApproval) return;
@@ -679,13 +859,28 @@ export const useOrchestrator = () => {
       const resolvedDefaultCommand = storeData?.defaultCommand || runtimeData?.defaultCommand || 'claude';
       const runtimeActiveTabByProject = sanitizeActiveTabByProjectMap(runtimeData?.activeTabByProject ?? sessionStorageData?.activeTabByProject);
       const sanitizedProjectPermissions = sanitizeProjectPermissions(storeData?.projectPermissions);
+      const sanitizedLivingSpecPreferences = sanitizeLivingSpecPreferences(storeData?.livingSpecPreferences);
 
       setBasePath(resolvedBasePath);
       void validatePath(resolvedBasePath);
       if (storeData?.context) setContext(storeData.context);
         // Env vars are intentionally not loaded from persistent disk storage.
       if (storeData?.defaultCommand) setDefaultCommand(storeData.defaultCommand);
-      if (storeData?.mcpServers) setMcpServers(storeData.mcpServers);
+      // MCP server JSON is intentionally not loaded from persistent disk storage.
+      if (typeof storeData?.mcpEnabled === 'boolean') setMcpEnabled(storeData.mcpEnabled);
+      if (storeData?.packageStoreStrategy === 'pnpm_global' || storeData?.packageStoreStrategy === 'polyglot_global') {
+        setPackageStoreStrategy(storeData.packageStoreStrategy);
+      }
+      if (storeData?.dependencyCloneMode === 'full_copy') setDependencyCloneMode('full_copy');
+      if (typeof storeData?.pnpmStorePath === 'string') setPnpmStorePath(storeData.pnpmStorePath);
+      if (typeof storeData?.sharedCacheRoot === 'string') setSharedCacheRoot(storeData.sharedCacheRoot);
+      if (typeof storeData?.pnpmAutoInstall === 'boolean') setPnpmAutoInstall(storeData.pnpmAutoInstall);
+      if (storeData?.sandboxMode === 'auto' || storeData?.sandboxMode === 'seatbelt' || storeData?.sandboxMode === 'firejail' || storeData?.sandboxMode === 'off') {
+        setSandboxMode(storeData.sandboxMode);
+      }
+      if (storeData?.networkGuard === 'none' || storeData?.networkGuard === 'off') {
+        setNetworkGuard(storeData.networkGuard);
+      }
 
       const rawActiveTab = runtimeData?.activeTab ?? sessionStorageData?.activeTab ?? null;
       const runtimeTaskUsage = sanitizeTaskUsageMap(runtimeData?.taskUsage ?? sessionStorageData?.taskUsage);
@@ -808,6 +1003,7 @@ export const useOrchestrator = () => {
       setActiveTab(finalActiveTab);
       setActiveTabByProject(finalActiveTabByProject);
       setProjectPermissions(seededProjectPolicies);
+      setLivingSpecPreferences(sanitizedLivingSpecPreferences);
       setTaskUsage(runtimeTaskUsage);
       setTaskTodos(runtimeTaskTodos);
       setTaskStatuses(runtimeTaskStatuses);
@@ -825,9 +1021,86 @@ export const useOrchestrator = () => {
 
   useEffect(() => {
     if (!isLoaded) return;
+    const normalizedProjectPath = normalizeProjectPath(basePath);
+    if (!normalizedProjectPath) return;
+    let cancelled = false;
+
+    const refreshLivingSpec = async () => {
+      const candidates = await detectLivingSpecCandidatesForProject(normalizedProjectPath);
+      if (cancelled) return;
+      if (candidates.length === 0) {
+        setLivingSpecSelectionPrompt((prev) => (prev?.projectPath === normalizedProjectPath ? null : prev));
+        return;
+      }
+
+      const currentPreference = livingSpecPreferencesRef.current[normalizedProjectPath];
+      if (isLivingSpecPreferenceValid(currentPreference, candidates)) {
+        setLivingSpecSelectionPrompt((prev) => (prev?.projectPath === normalizedProjectPath ? null : prev));
+        return;
+      }
+
+      if (candidates.length === 1) {
+        setProjectLivingSpecPreference(normalizedProjectPath, {
+          mode: 'single',
+          selectedPath: candidates[0].path
+        });
+        setLivingSpecSelectionPrompt((prev) => (prev?.projectPath === normalizedProjectPath ? null : prev));
+        return;
+      }
+
+      setLivingSpecSelectionPrompt({
+        projectPath: normalizedProjectPath,
+        candidates
+      });
+    };
+
+    void refreshLivingSpec();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isLoaded,
+    basePath,
+    detectLivingSpecCandidatesForProject,
+    isLivingSpecPreferenceValid,
+    setProjectLivingSpecPreference
+  ]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
     // Persist workspace defaults only. Env vars are excluded from disk persistence for safety.
-    void window.electronAPI.saveStore({ basePath, context, defaultCommand, mcpServers, projectPermissions });
-  }, [isLoaded, basePath, context, defaultCommand, mcpServers, projectPermissions]);
+    void window.electronAPI.saveStore({
+      basePath,
+      context,
+      defaultCommand,
+      mcpEnabled,
+      packageStoreStrategy,
+      dependencyCloneMode,
+      pnpmStorePath,
+      sharedCacheRoot,
+      pnpmAutoInstall,
+      sandboxMode,
+      networkGuard,
+      projectPermissions,
+      livingSpecPreferences
+    });
+  }, [
+    isLoaded,
+    basePath,
+    context,
+    defaultCommand,
+    mcpEnabled,
+    packageStoreStrategy,
+    dependencyCloneMode,
+    pnpmStorePath,
+    sharedCacheRoot,
+    pnpmAutoInstall,
+    sandboxMode,
+    networkGuard,
+    projectPermissions,
+    livingSpecPreferences
+  ]);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -1132,6 +1405,14 @@ export const useOrchestrator = () => {
       envVars,
       defaultCommand,
       mcpServers,
+      mcpEnabled,
+      packageStoreStrategy,
+      dependencyCloneMode,
+      pnpmStorePath,
+      sharedCacheRoot,
+      pnpmAutoInstall,
+      sandboxMode,
+      networkGuard,
       availableAgents,
       taskStatuses,
       taskTodos,
@@ -1141,6 +1422,9 @@ export const useOrchestrator = () => {
       pendingApprovalCount: pendingApprovals.length,
       attentionEvents,
       projectPermissions,
+      livingSpecPreferences,
+      livingSpecCandidatesByProject,
+      livingSpecSelectionPrompt,
       activeTabByProject
     },
     actions: {
@@ -1152,7 +1436,17 @@ export const useOrchestrator = () => {
       setEnvVars,
       setDefaultCommand,
       setMcpServers,
+      setMcpEnabled,
+      setPackageStoreStrategy,
+      setDependencyCloneMode,
+      setPnpmStorePath,
+      setSharedCacheRoot,
+      setPnpmAutoInstall,
+      setSandboxMode,
+      setNetworkGuard,
       updateProjectPermission,
+      resolveLivingSpecSelectionPrompt,
+      dismissLivingSpecSelectionPrompt,
       dismissAttentionEvent,
       clearAttentionEvents,
       createTask,
@@ -1160,6 +1454,7 @@ export const useOrchestrator = () => {
       closeTaskById,
       handoverTask,
       splitTask,
+      restoreExistingWorktree,
       approvePendingRequest,
       rejectPendingRequest,
       validatePath

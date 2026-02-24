@@ -13,7 +13,12 @@ interface PtyLifecycleHooks {
 }
 
 type PtyServiceInstance = {
-  createSession: (taskId: string, cwd: string, customEnv?: Record<string, string>, subscriberId?: string) => { created: boolean; running: boolean };
+  createSession: (
+    taskId: string,
+    cwd: string,
+    customEnv?: Record<string, string>,
+    subscriberId?: string
+  ) => { created: boolean; running: boolean; restarted?: boolean };
   attach: (taskId: string, subscriberId?: string) => {
     taskId: string;
     outputBuffer: string;
@@ -46,6 +51,7 @@ export class PtyManager {
   private hooks: PtyLifecycleHooks;
   private service: PtyServiceInstance;
   private rendererSubscribers = new Map<string, Set<number>>();
+  private static TASK_ID_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
 
   constructor(hooks: PtyLifecycleHooks = {}) {
     this.hooks = hooks;
@@ -93,45 +99,51 @@ export class PtyManager {
 
   private bindIpc() {
     ipcMain.on('pty:create', (event, { taskId, cwd, customEnv }) => {
-      const senderId = event.sender.id;
-      const existing = this.service.attach(taskId, String(senderId));
-      if (existing) {
-        this.trackSubscriber(taskId, senderId);
-        if (existing.outputBuffer) {
-          event.sender.send(`pty:data:${taskId}`, existing.outputBuffer);
-        }
-        if (existing.isBlocked) {
-          event.sender.send('agent:blocked', {
-            taskId,
-            isBlocked: true,
-            reason: existing.blockedReason
-          });
-        }
-        if (!existing.running) {
-          event.sender.send(`pty:exit:${taskId}`, {
-            taskId,
-            exitCode: existing.exitCode,
-            signal: existing.signal
-          });
-        }
-        event.sender.send(`pty:state:${taskId}`, {
-          taskId,
-          created: false,
-          running: existing.running
-        });
+      if (!PtyManager.TASK_ID_PATTERN.test(String(taskId || ''))) {
+        event.sender.send(`pty:data:${taskId}`, '\r\n[orchestrator] Invalid task id.\r\n');
         return;
       }
-
+      const senderId = event.sender.id;
       const state = this.service.createSession(taskId, cwd || process.env.HOME || '', customEnv || {}, String(senderId));
+      if (state && (state as any).error) {
+        event.sender.send(`pty:data:${taskId}`, `\r\n[orchestrator] ${(state as any).error}\r\n`);
+        return;
+      }
+      const existing = this.service.attach(taskId, String(senderId));
       this.trackSubscriber(taskId, senderId);
+      if (existing?.outputBuffer) {
+        event.sender.send(`pty:data:${taskId}`, existing.outputBuffer);
+      }
+      if (existing?.isBlocked) {
+        event.sender.send('agent:blocked', {
+          taskId,
+          isBlocked: true,
+          reason: existing.blockedReason
+        });
+      }
+      if (existing && !existing.running) {
+        event.sender.send(`pty:exit:${taskId}`, {
+          taskId,
+          exitCode: existing.exitCode,
+          signal: existing.signal
+        });
+      }
       event.sender.send(`pty:state:${taskId}`, {
         taskId,
         created: state.created,
-        running: state.running
+        running: state.running,
+        restarted: !!state.restarted
       });
     });
 
     ipcMain.on('pty:write', (event, { taskId, data }) => {
+      if (!PtyManager.TASK_ID_PATTERN.test(String(taskId || ''))) {
+        return;
+      }
+      if (typeof data !== 'string' || Buffer.byteLength(data, 'utf8') > 64_000) {
+        event.sender.send(`pty:data:${taskId}`, '\r\n[orchestrator] PTY write dropped: payload too large.\r\n');
+        return;
+      }
       const result = this.service.write(taskId, data);
       if (!result.success) {
         event.sender.send(`pty:data:${taskId}`, '\r\n[orchestrator] PTY is not running for this tab.\r\n');
@@ -139,15 +151,26 @@ export class PtyManager {
     });
 
     ipcMain.on('pty:resize', (event, { taskId, cols, rows }) => {
-      this.service.resize(taskId, cols, rows);
+      if (!PtyManager.TASK_ID_PATTERN.test(String(taskId || ''))) {
+        return;
+      }
+      const safeCols = Number.isFinite(cols) ? Math.max(20, Math.min(1000, cols)) : 80;
+      const safeRows = Number.isFinite(rows) ? Math.max(10, Math.min(1000, rows)) : 24;
+      this.service.resize(taskId, safeCols, safeRows);
     });
 
     ipcMain.on('pty:detach', (event, { taskId }) => {
+      if (!PtyManager.TASK_ID_PATTERN.test(String(taskId || ''))) {
+        return;
+      }
       this.untrackSubscriber(taskId, event.sender.id);
       this.service.detach(taskId, String(event.sender.id));
     });
 
     ipcMain.on('pty:destroy', (event, { taskId }) => {
+      if (!PtyManager.TASK_ID_PATTERN.test(String(taskId || ''))) {
+        return;
+      }
       this.service.destroy(taskId);
     });
 

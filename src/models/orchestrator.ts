@@ -68,6 +68,21 @@ export interface ProjectPermissionPolicy {
   promptResponse: 'y' | 'n';
 }
 
+export interface LivingSpecCandidate {
+  path: string;
+  kind: string;
+}
+
+export interface LivingSpecPreference {
+  mode: 'single' | 'consolidated';
+  selectedPath?: string;
+}
+
+export interface LivingSpecSelectionPrompt {
+  projectPath: string;
+  candidates: LivingSpecCandidate[];
+}
+
 export interface AttentionEvent {
   id: string;
   kind: 'blocked' | 'approval_required' | 'approval_auto_approved';

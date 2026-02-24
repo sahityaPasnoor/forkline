@@ -7,9 +7,21 @@ interface HandoverModalProps {
   onSubmit: (agentCommand: string, prompt: string) => void;
   defaultCommand: string;
   availableAgents: {name: string, command: string, version: string}[];
+  currentAgent?: string;
+  taskName?: string;
+  handoverPreview?: string;
 }
 
-const HandoverModal: React.FC<HandoverModalProps> = ({ isOpen, onClose, onSubmit, defaultCommand, availableAgents }) => {
+const HandoverModal: React.FC<HandoverModalProps> = ({
+  isOpen,
+  onClose,
+  onSubmit,
+  defaultCommand,
+  availableAgents,
+  currentAgent,
+  taskName,
+  handoverPreview
+}) => {
   const [command, setCommand] = useState(defaultCommand);
   const [prompt, setPrompt] = useState('');
 
@@ -32,8 +44,8 @@ const HandoverModal: React.FC<HandoverModalProps> = ({ isOpen, onClose, onSubmit
   };
 
   return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
-      <div className="app-panel rounded-xl shadow-2xl w-full max-w-lg overflow-hidden border border-[#1a1a1a]">
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+      <div className="app-panel rounded-xl shadow-2xl w-full max-w-xl overflow-hidden border border-[#1a1a1a] max-h-[90vh] flex flex-col">
         <div className="flex justify-between items-center p-4 border-b border-[#1a1a1a] bg-[#050505]">
           <div className="flex items-center space-x-2">
              <ArrowRightLeft className="text-[#a3a3a3]" size={16} />
@@ -42,8 +54,15 @@ const HandoverModal: React.FC<HandoverModalProps> = ({ isOpen, onClose, onSubmit
           <button onClick={onClose} className="text-[#525252] hover:text-white transition-colors"><X size={18} /></button>
         </div>
         
-        <form onSubmit={handleSubmit} className="p-6 space-y-5 bg-[#000000]">
-          <p className="text-xs text-[#888888] mb-2 leading-relaxed">Switch agent in the same worktree. Current session receives `SIGINT` first.</p>
+        <form onSubmit={handleSubmit} className="p-6 space-y-5 bg-[#000000] overflow-y-auto">
+          <p className="text-xs text-[#888888] mb-2 leading-relaxed">
+            Use handover when the current model is stuck or when you need a different model specialty. The new agent continues in the same worktree.
+          </p>
+          <div className="rounded border border-[#1f1f1f] bg-[#0a0a0a] px-3 py-2 text-[11px] font-mono text-[#d4d4d8]">
+            <div>Task: <span className="text-white">{taskName || 'unknown-task'}</span></div>
+            <div>Current agent: <span className="text-white">{currentAgent || 'unknown'}</span></div>
+            <div>Context packet: <span className="text-white">git status + todos + task objective</span></div>
+          </div>
           <div>
             <label className="block text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">New Agent</label>
             <select 
@@ -69,6 +88,11 @@ const HandoverModal: React.FC<HandoverModalProps> = ({ isOpen, onClose, onSubmit
               className="w-full h-24 input-stealth rounded p-3 text-xs"
               required
             />
+            {handoverPreview && (
+              <div className="mt-2 text-[10px] text-[#737373] font-mono truncate" title={handoverPreview}>
+                Preview: {handoverPreview}
+              </div>
+            )}
           </div>
 
           <div className="pt-2 flex justify-end space-x-3">

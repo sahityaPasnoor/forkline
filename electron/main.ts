@@ -7,6 +7,11 @@ import { PtyManager } from './ptyManager';
 import { GitManager } from './gitManager';
 import { AgentControlServer } from './agentServer';
 import { FleetStore, type FleetListTasksOptions, type FleetTaskPayload } from './fleetStore';
+const {
+  collectAgenticSpecCandidates,
+  sanitizeLivingSpecPreference,
+  resolveLivingSpecDocument
+} = require('../../packages/core/src/services/living-spec-service');
 
 const execFileAsync = util.promisify(execFile);
 const devServerUrl = process.env.VITE_DEV_SERVER_URL;
@@ -20,8 +25,11 @@ let detectedAgentsCache: { data: Array<{name: string; command: string; version: 
 
 const MAX_TEXT_FILE_BYTES = 256_000;
 const MAX_IMAGE_FILE_BYTES = 10_000_000;
+const MAX_WORKSPACE_JSON_BYTES = 512_000;
+const MAX_RUNTIME_SESSION_BYTES = 8_000_000;
 const WORKTREE_BASENAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
 const FILENAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
+type WorkspaceLivingSpecPreference = { mode: 'single' | 'consolidated'; selectedPath?: string };
 
 const resolveSafeWorktreePath = (rawPath: unknown): string | null => {
   if (typeof rawPath !== 'string') return null;
@@ -34,6 +42,21 @@ const resolveSafeWorktreePath = (rawPath: unknown): string | null => {
     if (!stats.isDirectory()) return null;
     const base = path.basename(resolved);
     if (!WORKTREE_BASENAME_PATTERN.test(base)) return null;
+    return resolved;
+  } catch {
+    return null;
+  }
+};
+
+const resolveSafeProjectPath = (rawPath: unknown): string | null => {
+  if (typeof rawPath !== 'string') return null;
+  const trimmed = rawPath.trim();
+  if (!trimmed) return null;
+  const resolved = path.resolve(trimmed);
+  if (!path.isAbsolute(resolved)) return null;
+  try {
+    const stats = fs.statSync(resolved);
+    if (!stats.isDirectory()) return null;
     return resolved;
   } catch {
     return null;
@@ -57,7 +80,83 @@ const normalizeCacheFilename = (value: unknown, fallback = 'file.bin'): string =
   return base;
 };
 
+const clampString = (value: unknown, maxChars: number) => {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return trimmed.slice(0, maxChars);
+};
+
+const sanitizePathString = (value: unknown) => {
+  const candidate = clampString(value, 4096);
+  if (!candidate) return '';
+  return path.resolve(candidate);
+};
+
+const sanitizeWorkspaceStoreData = (input: unknown) => {
+  const source = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
+  const rawPermissions = (source.projectPermissions && typeof source.projectPermissions === 'object')
+    ? source.projectPermissions as Record<string, unknown>
+    : {};
+  const rawLivingSpecPreferences = (source.livingSpecPreferences && typeof source.livingSpecPreferences === 'object')
+    ? source.livingSpecPreferences as Record<string, unknown>
+    : {};
+  const sanitizedPermissions: Record<string, { autonomousMode: boolean; autoApproveMerge: boolean; autoRespondPrompts: boolean; promptResponse: 'y' | 'n' }> = {};
+  const sanitizedLivingSpecPreferences: Record<string, WorkspaceLivingSpecPreference> = {};
+  for (const [rawPath, rawPolicy] of Object.entries(rawPermissions)) {
+    const normalizedPath = sanitizePathString(rawPath);
+    if (!normalizedPath || !rawPolicy || typeof rawPolicy !== 'object') continue;
+    const policy = rawPolicy as Record<string, unknown>;
+    sanitizedPermissions[normalizedPath] = {
+      autonomousMode: !!policy.autonomousMode,
+      autoApproveMerge: !!policy.autoApproveMerge,
+      autoRespondPrompts: !!policy.autoRespondPrompts,
+      promptResponse: policy.promptResponse === 'n' ? 'n' : 'y'
+    };
+  }
+  for (const [rawPath, rawPreference] of Object.entries(rawLivingSpecPreferences)) {
+    const normalizedPath = sanitizePathString(rawPath);
+    if (!normalizedPath) continue;
+    const preference = sanitizeLivingSpecPreference(rawPreference);
+    if (!preference) continue;
+    sanitizedLivingSpecPreferences[normalizedPath] = preference;
+  }
+
+  return {
+    basePath: sanitizePathString(source.basePath),
+    context: clampUtf8(source.context, MAX_TEXT_FILE_BYTES),
+    defaultCommand: clampString(source.defaultCommand, 128),
+    mcpEnabled: !!source.mcpEnabled,
+    packageStoreStrategy: source.packageStoreStrategy === 'pnpm_global' || source.packageStoreStrategy === 'polyglot_global'
+      ? source.packageStoreStrategy
+      : 'off',
+    dependencyCloneMode: source.dependencyCloneMode === 'full_copy' ? 'full_copy' : 'copy_on_write',
+    pnpmStorePath: sanitizePathString(source.pnpmStorePath),
+    sharedCacheRoot: sanitizePathString(source.sharedCacheRoot),
+    pnpmAutoInstall: !!source.pnpmAutoInstall,
+    sandboxMode: source.sandboxMode === 'auto' || source.sandboxMode === 'seatbelt' || source.sandboxMode === 'firejail'
+      ? source.sandboxMode
+      : 'off',
+    networkGuard: source.networkGuard === 'none' ? 'none' : 'off',
+    projectPermissions: sanitizedPermissions,
+    livingSpecPreferences: sanitizedLivingSpecPreferences
+  };
+};
+
+const safeWriteJson = (targetPath: string, data: unknown, maxBytes: number) => {
+  const raw = JSON.stringify(data, null, 2);
+  if (Buffer.byteLength(raw, 'utf8') > maxBytes) {
+    throw new Error(`JSON payload too large for ${path.basename(targetPath)}.`);
+  }
+  fs.writeFileSync(targetPath, raw);
+};
+
 app.setName('Forkline');
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
 
 const migrateLegacyUserData = () => {
   try {
@@ -98,6 +197,8 @@ const loadRuntimeSessionFromDisk = () => {
   if (!runtimeSessionFile) return null;
   try {
     if (!fs.existsSync(runtimeSessionFile)) return null;
+    const stats = fs.statSync(runtimeSessionFile);
+    if (!stats.isFile() || stats.size > MAX_RUNTIME_SESSION_BYTES) return null;
     const raw = fs.readFileSync(runtimeSessionFile, 'utf8');
     return JSON.parse(raw);
   } catch {
@@ -108,13 +209,18 @@ const loadRuntimeSessionFromDisk = () => {
 const saveRuntimeSessionToDisk = (data: any) => {
   if (!runtimeSessionFile) return;
   try {
-    fs.writeFileSync(runtimeSessionFile, JSON.stringify(data ?? null, null, 2));
+    safeWriteJson(runtimeSessionFile, data ?? null, MAX_RUNTIME_SESSION_BYTES);
   } catch {
     // Best-effort persistence. Runtime state still remains in memory.
   }
 };
 
 function createWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.focus();
+    return;
+  }
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -136,7 +242,15 @@ function createWindow() {
     }
   });
 
-  agentServer = new AgentControlServer(mainWindow);
+  if (!agentServer) {
+    agentServer = new AgentControlServer(mainWindow);
+  } else {
+    agentServer.setMainWindow(mainWindow);
+  }
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
 
   if (isDev) {
     mainWindow.loadURL(devServerUrl!);
@@ -247,6 +361,19 @@ app.whenReady().then(async () => {
     return installed;
   });
 
+  ipcMain.handle('app:detectLivingSpecCandidates', async (event, { basePath }) => {
+    try {
+      const safeBasePath = resolveSafeProjectPath(basePath);
+      if (!safeBasePath) {
+        return { success: false, error: 'Invalid base path', candidates: [] };
+      }
+      const candidates = collectAgenticSpecCandidates(safeBasePath);
+      return { success: true, candidates };
+    } catch (e: any) {
+      return { success: false, error: e.message, candidates: [] };
+    }
+  });
+
   ipcMain.handle('app:saveImage', async (event, { worktreePath, imageBase64, filename }) => {
     try {
       const safeWorktreePath = resolveSafeWorktreePath(worktreePath);
@@ -277,11 +404,22 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle('app:prepareAgentWorkspace', async (event, { worktreePath, context, mcpServers, apiDoc }) => {
+  ipcMain.handle('app:prepareAgentWorkspace', async (event, {
+    worktreePath,
+    projectPath,
+    context,
+    mcpServers,
+    apiDoc,
+    livingSpecPreference
+  }) => {
     try {
       const safeWorktreePath = resolveSafeWorktreePath(worktreePath);
       if (!safeWorktreePath) {
         return { success: false, error: 'Invalid worktree path' };
+      }
+      const safeProjectPath = resolveSafeProjectPath(projectPath);
+      if (!safeProjectPath) {
+        return { success: false, error: 'Invalid project path' };
       }
       const cacheDir = path.join(safeWorktreePath, '.agent_cache');
       if (!fs.existsSync(cacheDir)) {
@@ -302,10 +440,35 @@ app.whenReady().then(async () => {
         fs.writeFileSync(path.join(cacheDir, 'agent_api.md'), safeApiDoc, 'utf8');
       }
 
+      const resolvedLivingSpec = resolveLivingSpecDocument(
+        safeProjectPath,
+        sanitizeLivingSpecPreference(livingSpecPreference)
+      );
+      const forklineSpecPath = path.join(cacheDir, 'FORKLINE_SPEC.md');
+      if (resolvedLivingSpec?.content) {
+        fs.writeFileSync(forklineSpecPath, resolvedLivingSpec.content, 'utf8');
+      } else if (fs.existsSync(forklineSpecPath)) {
+        fs.rmSync(forklineSpecPath, { force: true });
+      }
+
       const memoryPath = path.join(cacheDir, 'agent_memory.md');
       const safeContext = clampUtf8(context, MAX_TEXT_FILE_BYTES);
+      const memorySections: string[] = [];
       if (safeContext) {
-        fs.writeFileSync(memoryPath, `Project Memory Context: ${safeContext}\n`, 'utf8');
+        memorySections.push(`Project Memory Context:\n${safeContext}`);
+      }
+      if (resolvedLivingSpec?.content) {
+        memorySections.push(
+          [
+            'Living Spec:',
+            `- canonical path: .agent_cache/FORKLINE_SPEC.md`,
+            `- mode: ${resolvedLivingSpec.mode}`,
+            `- sources: ${resolvedLivingSpec.sources.join(', ')}`
+          ].join('\n')
+        );
+      }
+      if (memorySections.length > 0) {
+        fs.writeFileSync(memoryPath, `${memorySections.join('\n\n')}\n`, 'utf8');
       } else if (fs.existsSync(memoryPath)) {
         fs.rmSync(memoryPath, { force: true });
       }
@@ -333,7 +496,8 @@ app.whenReady().then(async () => {
   
   ipcMain.handle('store:save', async (event, { data }) => {
     try {
-      fs.writeFileSync(workspaceFile, JSON.stringify(data, null, 2));
+      const sanitized = sanitizeWorkspaceStoreData(data);
+      safeWriteJson(workspaceFile, sanitized, MAX_WORKSPACE_JSON_BYTES);
       return { success: true };
     } catch (e: any) {
       return { success: false, error: e.message };
@@ -344,7 +508,7 @@ app.whenReady().then(async () => {
     try {
       if (fs.existsSync(workspaceFile)) {
         const raw = fs.readFileSync(workspaceFile, 'utf8');
-        return { success: true, data: JSON.parse(raw) };
+        return { success: true, data: sanitizeWorkspaceStoreData(JSON.parse(raw)) };
       }
       return { success: true, data: null };
     } catch (e: any) {
@@ -353,9 +517,17 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('session:saveRuntime', async (event, { data }) => {
-    runtimeSessionState = data;
-    saveRuntimeSessionToDisk(runtimeSessionState);
-    return { success: true };
+    try {
+      const serialized = JSON.stringify(data ?? null);
+      if (Buffer.byteLength(serialized, 'utf8') > MAX_RUNTIME_SESSION_BYTES) {
+        return { success: false, error: 'Runtime session payload too large.' };
+      }
+      runtimeSessionState = JSON.parse(serialized);
+      saveRuntimeSessionToDisk(runtimeSessionState);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Invalid runtime session payload.' };
+    }
   });
 
   ipcMain.handle('session:loadRuntime', async () => {
@@ -444,6 +616,14 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('second-instance', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.focus();
 });
 
 app.on('window-all-closed', () => {

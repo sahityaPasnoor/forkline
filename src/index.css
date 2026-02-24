@@ -5,12 +5,223 @@
 :root {
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --bg: #000000;
+  --fg: #e5e5e5;
+  --panel: #050505;
+  --panel-border: #1a1a1a;
+  --btn-ghost-bg-hover: #121212;
+  --btn-ghost-border-hover: #262626;
+  --btn-ghost-fg: #a3a3a3;
+  --btn-ghost-fg-hover: #f5f5f5;
+  --btn-primary-bg: #ffffff;
+  --btn-primary-fg: #000000;
+  --btn-primary-bg-hover: #e5e5e5;
+  --input-bg: #0a0a0a;
+  --input-bg-focus: #121212;
+  --input-border: #262626;
+  --input-border-focus: #525252;
+  --xterm-bg: #000000;
+  --xterm-fg: #e5e5e5;
+  --xterm-cursor: #ffffff;
+  --xterm-selection: rgba(255, 255, 255, 0.2);
+  --panel-subtle: #0a0a0a;
+  --panel-strong: #121212;
+  --text-primary: #e5e5e5;
+  --text-secondary: #a3a3a3;
+  --text-tertiary: #737373;
+  --text-muted: #6b7280;
+}
+
+html[data-theme="graphite"] {
+  --bg: #0b0d10;
+  --fg: #dde1e7;
+  --panel: #101419;
+  --panel-border: #2a3038;
+  --btn-ghost-bg-hover: #1a2129;
+  --btn-ghost-border-hover: #323b45;
+  --btn-primary-bg: #dbe3f0;
+  --btn-primary-fg: #111827;
+  --btn-primary-bg-hover: #c7d4e8;
+  --input-bg: #141a20;
+  --input-bg-focus: #1b2430;
+  --input-border: #313b47;
+  --input-border-focus: #4f5e71;
+  --xterm-bg: #090c10;
+}
+
+html[data-theme="midnight-teal"] {
+  --bg: #041217;
+  --fg: #d9f3f0;
+  --panel: #092027;
+  --panel-border: #1f4a52;
+  --btn-ghost-bg-hover: #10313a;
+  --btn-ghost-border-hover: #2e636d;
+  --btn-primary-bg: #4bd3cf;
+  --btn-primary-fg: #032326;
+  --btn-primary-bg-hover: #36b8b4;
+  --input-bg: #0c262e;
+  --input-bg-focus: #123740;
+  --input-border: #2d5f68;
+  --input-border-focus: #4da6ad;
+  --xterm-bg: #05171d;
+}
+
+html[data-theme="amber-night"] {
+  --bg: #140d05;
+  --fg: #f8e8c8;
+  --panel: #1b1208;
+  --panel-border: #4b3116;
+  --btn-ghost-bg-hover: #2a1a09;
+  --btn-ghost-border-hover: #6d4b1e;
+  --btn-primary-bg: #f0b34a;
+  --btn-primary-fg: #2b1802;
+  --btn-primary-bg-hover: #df9d34;
+  --input-bg: #211507;
+  --input-bg-focus: #2d1f0b;
+  --input-border: #6a461d;
+  --input-border-focus: #8c5f27;
+  --xterm-bg: #120b03;
+}
+
+html[data-theme="forest-terminal"] {
+  --bg: #071107;
+  --fg: #d8f3dc;
+  --panel: #0b1a0c;
+  --panel-border: #24512a;
+  --btn-ghost-bg-hover: #143019;
+  --btn-ghost-border-hover: #2d6a35;
+  --btn-primary-bg: #65d46e;
+  --btn-primary-fg: #07200a;
+  --btn-primary-bg-hover: #4fc258;
+  --input-bg: #122014;
+  --input-bg-focus: #16301a;
+  --input-border: #2b5f32;
+  --input-border-focus: #5fa86b;
+  --xterm-bg: #071407;
+}
+
+html[data-theme="ocean-deep"] {
+  --bg: #06111f;
+  --fg: #d6e7ff;
+  --panel: #0a1a33;
+  --panel-border: #244779;
+  --btn-ghost-bg-hover: #122847;
+  --btn-ghost-border-hover: #3866a5;
+  --btn-primary-bg: #74aaff;
+  --btn-primary-fg: #071326;
+  --btn-primary-bg-hover: #5e97ee;
+  --input-bg: #10203b;
+  --input-bg-focus: #132a4b;
+  --input-border: #325e96;
+  --input-border-focus: #5f90d3;
+  --xterm-bg: #071325;
+}
+
+html[data-theme="sunset-dark"] {
+  --bg: #1a0e14;
+  --fg: #f8dce3;
+  --panel: #23111a;
+  --panel-border: #5b2e3b;
+  --btn-ghost-bg-hover: #341824;
+  --btn-ghost-border-hover: #8a4257;
+  --btn-primary-bg: #ff9a76;
+  --btn-primary-fg: #38150a;
+  --btn-primary-bg-hover: #f3835b;
+  --input-bg: #2c1520;
+  --input-bg-focus: #381b2a;
+  --input-border: #7a3b50;
+  --input-border-focus: #b26782;
+  --xterm-bg: #180d13;
+}
+
+html[data-theme="paper-light"] {
+  --bg: #f6f7f9;
+  --fg: #111827;
+  --panel: #ffffff;
+  --panel-border: #d5dbe4;
+  --btn-ghost-bg-hover: #eef2f8;
+  --btn-ghost-border-hover: #c8d2df;
+  --btn-ghost-fg: #374151;
+  --btn-ghost-fg-hover: #111827;
+  --btn-primary-bg: #111827;
+  --btn-primary-fg: #f9fafb;
+  --btn-primary-bg-hover: #1f2937;
+  --input-bg: #f9fafb;
+  --input-bg-focus: #ffffff;
+  --input-border: #cbd5e1;
+  --input-border-focus: #64748b;
+  --xterm-bg: #ffffff;
+  --xterm-fg: #111827;
+  --xterm-cursor: #111827;
+  --xterm-selection: rgba(31, 41, 55, 0.2);
+  --panel-subtle: #eef2f8;
+  --panel-strong: #f9fafb;
+  --text-primary: #111827;
+  --text-secondary: #374151;
+  --text-tertiary: #4b5563;
+  --text-muted: #64748b;
+}
+
+html[data-theme="sandstorm-light"] {
+  --bg: #f7f3ea;
+  --fg: #2b2217;
+  --panel: #fffaf0;
+  --panel-border: #d9c9ae;
+  --btn-ghost-bg-hover: #f3ead9;
+  --btn-ghost-border-hover: #d7bc92;
+  --btn-ghost-fg: #55432c;
+  --btn-ghost-fg-hover: #2b2217;
+  --btn-primary-bg: #7f4f24;
+  --btn-primary-fg: #fff6ea;
+  --btn-primary-bg-hover: #6d431f;
+  --input-bg: #fff8ec;
+  --input-bg-focus: #fffdf8;
+  --input-border: #d8c09d;
+  --input-border-focus: #ae8a5a;
+  --xterm-bg: #fff8ed;
+  --xterm-fg: #2b2217;
+  --xterm-cursor: #5f3c1d;
+  --xterm-selection: rgba(127, 79, 36, 0.2);
+  --panel-subtle: #f3ead9;
+  --panel-strong: #fff8ec;
+  --text-primary: #2b2217;
+  --text-secondary: #55432c;
+  --text-tertiary: #6b5439;
+  --text-muted: #8a6f4d;
+}
+
+html[data-theme="ice-light"] {
+  --bg: #eef4f9;
+  --fg: #10263d;
+  --panel: #f9fcff;
+  --panel-border: #bfd2e6;
+  --btn-ghost-bg-hover: #e4eef8;
+  --btn-ghost-border-hover: #acc5de;
+  --btn-ghost-fg: #2e4c68;
+  --btn-ghost-fg-hover: #10263d;
+  --btn-primary-bg: #1f5f8b;
+  --btn-primary-fg: #f8fcff;
+  --btn-primary-bg-hover: #184d72;
+  --input-bg: #f4f9ff;
+  --input-bg-focus: #ffffff;
+  --input-border: #b8cee5;
+  --input-border-focus: #5f89b1;
+  --xterm-bg: #f4faff;
+  --xterm-fg: #10263d;
+  --xterm-cursor: #1f5f8b;
+  --xterm-selection: rgba(31, 95, 139, 0.2);
+  --panel-subtle: #e4eef8;
+  --panel-strong: #f4f9ff;
+  --text-primary: #10263d;
+  --text-secondary: #2e4c68;
+  --text-tertiary: #3d6284;
+  --text-muted: #5f89b1;
 }
 
 @layer base {
   body {
-    background-color: #000000;
-    color: #e5e5e5;
+    background-color: var(--bg);
+    color: var(--fg);
     font-family: var(--font-ui);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -47,51 +258,51 @@
 
 /* UI Elements */
 .app-panel {
-  background-color: #050505;
-  border: 1px solid #1a1a1a;
+  background-color: var(--panel);
+  border: 1px solid var(--panel-border);
 }
 
 .btn-ghost {
   background-color: transparent;
   border: 1px solid transparent;
-  color: #a3a3a3;
+  color: var(--btn-ghost-fg);
   transition: all 0.15s ease;
 }
 
 .btn-ghost:hover {
-  background-color: #121212;
-  border-color: #262626;
-  color: #f5f5f5;
+  background-color: var(--btn-ghost-bg-hover);
+  border-color: var(--btn-ghost-border-hover);
+  color: var(--btn-ghost-fg-hover);
 }
 
 .btn-primary {
-  background-color: #ffffff;
-  color: #000000;
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
   font-weight: 600;
   transition: all 0.15s ease;
 }
 
 .btn-primary:hover {
-  background-color: #e5e5e5;
+  background-color: var(--btn-primary-bg-hover);
   box-shadow: 0 0 10px rgba(255,255,255,0.2);
 }
 
 .input-stealth {
-  background-color: #0a0a0a;
-  border: 1px solid #262626;
-  color: #e5e5e5;
+  background-color: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--fg);
   transition: all 0.15s ease;
 }
 
 .input-stealth:focus {
   outline: none;
-  border-color: #525252;
-  background-color: #121212;
+  border-color: var(--input-border-focus);
+  background-color: var(--input-bg-focus);
 }
 
 /* Xterm Overrides */
 .xterm-viewport {
-  background-color: #000000 !important;
+  background-color: var(--xterm-bg) !important;
 }
 
 .xterm,
@@ -108,3 +319,41 @@
   -webkit-text-fill-color: transparent;
   background-image: linear-gradient(90deg, #ffffff, #888888);
 }
+
+/* Compatibility layer: map older hard-coded utility colors to theme variables */
+html[data-theme] .bg-\[\#000000\] { background-color: var(--bg) !important; }
+html[data-theme] .bg-\[\#050505\] { background-color: var(--panel) !important; }
+html[data-theme] .bg-\[\#070707\],
+html[data-theme] .bg-\[\#090909\],
+html[data-theme] .bg-\[\#0a0a0a\],
+html[data-theme] .bg-\[\#0c0c0c\],
+html[data-theme] .bg-\[\#111111\] { background-color: var(--panel-subtle) !important; }
+html[data-theme] .bg-\[\#121212\],
+html[data-theme] .bg-\[\#161616\] { background-color: var(--panel-strong) !important; }
+
+html[data-theme] .border-\[\#1a1a1a\],
+html[data-theme] .border-\[\#1f1f1f\],
+html[data-theme] .border-\[\#262626\],
+html[data-theme] .border-\[\#2a2a2a\],
+html[data-theme] .border-\[\#2d2d2d\] { border-color: var(--panel-border) !important; }
+
+html[data-theme] .text-\[\#e5e5e5\],
+html[data-theme] .text-\[\#d4d4d8\] { color: var(--text-primary) !important; }
+html[data-theme] .text-\[\#a3a3a3\],
+html[data-theme] .text-\[\#9ca3af\],
+html[data-theme] .text-\[\#888888\] { color: var(--text-secondary) !important; }
+html[data-theme] .text-\[\#737373\],
+html[data-theme] .text-\[\#6b7280\],
+html[data-theme] .text-\[\#525252\] { color: var(--text-tertiary) !important; }
+
+html[data-theme="paper-light"] .app-panel .text-white,
+html[data-theme="sandstorm-light"] .app-panel .text-white,
+html[data-theme="ice-light"] .app-panel .text-white { color: var(--text-primary) !important; }
+
+html[data-theme="paper-light"] .hover\:text-white:hover,
+html[data-theme="sandstorm-light"] .hover\:text-white:hover,
+html[data-theme="ice-light"] .hover\:text-white:hover { color: var(--text-primary) !important; }
+
+html[data-theme="paper-light"] .group:hover .group-hover\:text-white,
+html[data-theme="sandstorm-light"] .group:hover .group-hover\:text-white,
+html[data-theme="ice-light"] .group:hover .group-hover\:text-white { color: var(--text-primary) !important; }

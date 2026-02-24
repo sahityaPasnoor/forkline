@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { FolderTree, GitBranch, Activity } from 'lucide-react';
+import { FolderTree, GitBranch, Activity, Trash2 } from 'lucide-react';
 import type { TaskStatus, TaskTab } from '../models/orchestrator';
 
 interface WorktreeInventoryModalProps {
@@ -9,6 +9,8 @@ interface WorktreeInventoryModalProps {
   tabs: TaskTab[];
   statuses: Record<string, TaskStatus>;
   onOpenSession: (taskId: string) => void;
+  onOpenWorktree: (projectPath: string, worktreePath: string, branchName?: string | null) => void;
+  onDeleteWorktree: (projectPath: string, worktreePath: string, branchName?: string | null) => void;
 }
 
 interface WorktreeEntry {
@@ -52,7 +54,9 @@ const WorktreeInventoryModal: React.FC<WorktreeInventoryModalProps> = ({
   projectPaths,
   tabs,
   statuses,
-  onOpenSession
+  onOpenSession,
+  onOpenWorktree,
+  onDeleteWorktree
 }) => {
   const [inventory, setInventory] = useState<Record<string, ProjectInventory>>({});
 
@@ -194,9 +198,36 @@ const WorktreeInventoryModal: React.FC<WorktreeInventoryModalProps> = ({
                                 >
                                   open session
                                 </button>
+                                <button
+                                  onClick={() => onDeleteWorktree(projectPath, worktree.path, worktree.branchName)}
+                                  className="btn-ghost px-3 py-1 rounded text-[10px] uppercase tracking-wider text-red-300 hover:text-red-200 flex items-center"
+                                  title="Delete this worktree and branch"
+                                >
+                                  <Trash2 size={10} className="mr-1" />
+                                  delete
+                                </button>
                               </>
                             ) : (
-                              <div className="text-[10px] text-[#6b7280] font-mono uppercase tracking-wider">no session</div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => {
+                                    onOpenWorktree(projectPath, worktree.path, worktree.branchName);
+                                    onClose();
+                                  }}
+                                  className="btn-ghost px-3 py-1 rounded text-[10px] uppercase tracking-wider"
+                                  title="Attach this existing worktree to a tab session"
+                                >
+                                  open terminal
+                                </button>
+                                <button
+                                  onClick={() => onDeleteWorktree(projectPath, worktree.path, worktree.branchName)}
+                                  className="btn-ghost px-3 py-1 rounded text-[10px] uppercase tracking-wider text-red-300 hover:text-red-200 flex items-center"
+                                  title="Delete this worktree and branch"
+                                >
+                                  <Trash2 size={10} className="mr-1" />
+                                  delete
+                                </button>
+                              </div>
                             )}
                           </div>
                         </div>

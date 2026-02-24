@@ -7,12 +7,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getControlAuthToken: () => ipcRenderer.invoke('app:getControlAuthToken'),
   validateSource: (sourcePath: string) => ipcRenderer.invoke('git:validateSource', { sourcePath }),
   detectAgents: () => ipcRenderer.invoke('app:detectAgents'),
-  prepareAgentWorkspace: (worktreePath: string, context: string, mcpServers: string, apiDoc: string) =>
-    ipcRenderer.invoke('app:prepareAgentWorkspace', { worktreePath, context, mcpServers, apiDoc }),
+  prepareAgentWorkspace: (
+    worktreePath: string,
+    projectPath: string,
+    context: string,
+    mcpServers: string,
+    apiDoc: string,
+    livingSpecPreference?: { mode: 'single' | 'consolidated'; selectedPath?: string }
+  ) =>
+    ipcRenderer.invoke('app:prepareAgentWorkspace', { worktreePath, projectPath, context, mcpServers, apiDoc, livingSpecPreference }),
+  detectLivingSpecCandidates: (basePath: string) =>
+    ipcRenderer.invoke('app:detectLivingSpecCandidates', { basePath }),
   saveImage: (worktreePath: string, imageBase64: string, filename: string) => ipcRenderer.invoke('app:saveImage', { worktreePath, imageBase64, filename }),
-  createWorktree: (basePath: string, taskName: string) => ipcRenderer.invoke('git:createWorktree', { basePath, taskName }),
+  createWorktree: (
+    basePath: string,
+    taskName: string,
+    baseBranch?: string,
+    options?: {
+      createBaseBranchIfMissing?: boolean;
+      dependencyCloneMode?: 'copy_on_write' | 'full_copy';
+      packageStoreStrategy?: 'off' | 'pnpm_global' | 'polyglot_global';
+      pnpmStorePath?: string;
+      sharedCacheRoot?: string;
+      pnpmAutoInstall?: boolean;
+    }
+  ) => ipcRenderer.invoke('git:createWorktree', { basePath, taskName, baseBranch, options }),
   listWorktrees: (basePath: string) => ipcRenderer.invoke('git:listWorktrees', { basePath }),
-  getDiff: (worktreePath: string) => ipcRenderer.invoke('git:getDiff', { worktreePath }),
+  getWorkspaceInfo: (basePath: string) => ipcRenderer.invoke('git:getWorkspaceInfo', { basePath }),
+  listBranches: (basePath: string) => ipcRenderer.invoke('git:listBranches', { basePath }),
+  getDiff: (worktreePath: string, options?: { syntaxAware?: boolean }) => ipcRenderer.invoke('git:getDiff', { worktreePath, options }),
   getModifiedFiles: (worktreePath: string) => ipcRenderer.invoke('git:getModifiedFiles', { worktreePath }),
   removeWorktree: (basePath: string, taskName: string, worktreePath: string, force: boolean) => ipcRenderer.invoke('git:removeWorktree', { basePath, taskName, worktreePath, force }),
   mergeWorktree: (basePath: string, taskName: string, worktreePath: string) => ipcRenderer.invoke('git:mergeWorktree', { basePath, taskName, worktreePath }),
@@ -41,9 +64,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on(channel, listener);
     return () => ipcRenderer.removeListener(channel, listener);
   },
-  onPtyState: (taskId: string, callback: (data: {taskId: string, created: boolean, running: boolean}) => void) => {
+  onPtyState: (taskId: string, callback: (data: {taskId: string, created: boolean, running: boolean, restarted?: boolean}) => void) => {
     const channel = `pty:state:${taskId}`;
-    const listener = (_: Electron.IpcRendererEvent, data: {taskId: string, created: boolean, running: boolean}) => callback(data);
+    const listener = (
+      _: Electron.IpcRendererEvent,
+      data: {taskId: string, created: boolean, running: boolean, restarted?: boolean}
+    ) => callback(data);
     ipcRenderer.on(channel, listener);
     return () => ipcRenderer.removeListener(channel, listener);
   },

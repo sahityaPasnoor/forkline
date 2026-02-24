@@ -31,7 +31,7 @@ const Sidebar: React.FC<SidebarProps> = ({ tabs, activeTab, statuses, usageByTas
         <div className="flex items-center space-x-3">
           <TerminalSquare size={18} className="text-white" />
           {!compact && (
-            <h1 className="text-xs font-bold text-white tracking-[0.2em] uppercase">Agent Manager</h1>
+            <h1 className="text-xs font-bold text-white tracking-[0.2em] uppercase">Sessions</h1>
           )}
         </div>
       </div>
@@ -40,6 +40,7 @@ const Sidebar: React.FC<SidebarProps> = ({ tabs, activeTab, statuses, usageByTas
         {tabs.map(tab => {
           const status = statuses[tab.id] || { isReady: false, isDirty: false, hasCollision: false, isBlocked: false };
           const usage = usageByTask[tab.id];
+          const usageLabel = formatTaskUsage(usage);
           const isActive = activeTab === tab.id;
           
           return (
@@ -78,22 +79,27 @@ const Sidebar: React.FC<SidebarProps> = ({ tabs, activeTab, statuses, usageByTas
 
               {!compact && (
                 <div className="ml-3 flex flex-col overflow-hidden flex-1">
-                  <div className={`text-[13px] font-medium truncate ${status.isBlocked ? 'text-red-400' : isActive ? 'text-white' : 'text-[#a3a3a3] group-hover:text-white transition-colors'}`}>
+                  <div className={`text-[13px] font-semibold truncate ${status.isBlocked ? 'text-red-400' : isActive ? 'text-white' : 'text-[#d4d4d8] group-hover:text-white transition-colors'}`}>
                     {tab.name}
                   </div>
                   <div className="flex items-center justify-between mt-0.5">
-                    <div className="text-[9px] text-[#737373] uppercase tracking-widest font-semibold">{getStatusLabel(status)}</div>
-                    {isActive && (
+                    <div
+                      className="text-[9px] text-[#9ca3af] uppercase tracking-widest font-semibold"
+                      title={`Session state: ${getStatusLabel(status)}.`}
+                    >
+                      {getStatusLabel(status)}
+                    </div>
+                    {isActive && usageLabel && (
                       <div className="text-[9px] text-[#666666] uppercase tracking-wider font-mono truncate ml-2">
-                        {formatTaskUsage(usage)}
+                        {usageLabel}
                       </div>
                     )}
                   </div>
-                  {isActive && (
-                    <div className="text-[9px] text-[#525252] uppercase tracking-widest font-mono mt-0.5 truncate">
+                  <div className="mt-1 inline-flex max-w-full items-center">
+                    <span className="text-[9px] px-1.5 py-0.5 rounded border border-[#2d2d2d] bg-[#111111] text-[#d1d5db] uppercase tracking-widest font-mono truncate" title={`Agent command: ${tab.agent}`}>
                       {tab.agent}
-                    </div>
-                  )}
+                    </span>
+                  </div>
                 </div>
               )}
 

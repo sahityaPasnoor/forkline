@@ -1,17 +1,12 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { ArrowRightLeft, GitMerge, Code, Trash2, AlertTriangle, TerminalSquare, Pause, Play } from 'lucide-react';
+import { ArrowRightLeft, GitMerge, Code, AlertTriangle, TerminalSquare, Pause, Play, Map, Trash2 } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
-import { shellQuote } from '../lib/shell';
-import type { TaskUsage } from '../models/orchestrator';
+import type { LivingSpecPreference, TaskUsage } from '../models/orchestrator';
 import { formatTaskCost, formatTaskUsage } from '../lib/usageUtils';
-
-type QuickActionMode = 'unknown' | 'shell' | 'agent';
-
-const MAX_RECENT_OUTPUT = 8000;
-const stripAnsi = (value: string) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-const shellPromptPattern = /(?:^|\n)[^\n]{0,240}[#$%]\s$/;
+import { detectAgentCapabilities, resolveQuickActionPlan, type QuickActionId, type QuickActionStep } from '../lib/quickActions';
+import { buildAgentLaunchPlan } from '../lib/agentProfiles';
 
 interface TerminalProps {
   taskId: string;
@@ -21,6 +16,14 @@ interface TerminalProps {
   envVars?: string;
   prompt?: string;
   mcpServers?: string;
+  mcpEnabled?: boolean;
+  projectPath: string;
+  livingSpecPreference?: LivingSpecPreference;
+  packageStoreStrategy?: 'off' | 'pnpm_global' | 'polyglot_global';
+  pnpmStorePath?: string;
+  sharedCacheRoot?: string;
+  sandboxMode?: 'off' | 'auto' | 'seatbelt' | 'firejail';
+  networkGuard?: 'off' | 'none';
   shouldBootstrap?: boolean;
   onBootstrapped?: () => void;
   capabilities?: { autoMerge: boolean };
@@ -40,6 +43,14 @@ const Terminal: React.FC<TerminalProps> = ({
   envVars,
   prompt,
   mcpServers,
+  mcpEnabled,
+  projectPath,
+  livingSpecPreference,
+  packageStoreStrategy,
+  pnpmStorePath,
+  sharedCacheRoot,
+  sandboxMode,
+  networkGuard,
   shouldBootstrap,
   onBootstrapped,
   capabilities,
@@ -56,32 +67,113 @@ const Terminal: React.FC<TerminalProps> = ({
   const fitAddonInstance = useRef<FitAddon | null>(null);
   const controlTaskUrlRef = useRef(fallbackTaskControlUrl);
   const controlAuthTokenRef = useRef('');
+  const ptyEnvRef = useRef<Record<string, string> | null>(null);
   const lastQuickActionAtRef = useRef(0);
-  const pendingStealthTimeoutRef = useRef<number | null>(null);
-  const recentOutputRef = useRef('');
-  const quickActionModeRef = useRef<QuickActionMode>('unknown');
   const lastAgentLaunchAtRef = useRef(0);
+  const ptyRunningRef = useRef(false);
   const isInitialized = useRef(false);
   const onBootstrappedRef = useRef(onBootstrapped);
-  const normalizedAgent = useMemo(() => agentCommand.toLowerCase(), [agentCommand]);
-  const isAiderAgent = useMemo(() => normalizedAgent.includes('aider'), [normalizedAgent]);
-  const isPromptAgent = useMemo(() => /(claude|codex|gemini|amp|cursor|cline|sweep)/.test(normalizedAgent), [normalizedAgent]);
+  const capabilitiesProfile = useMemo(() => detectAgentCapabilities(agentCommand), [agentCommand]);
   const usageSummaryLabel = useMemo(() => formatTaskUsage(taskUsage), [taskUsage]);
   const usageCostLabel = useMemo(() => formatTaskCost(taskUsage), [taskUsage]);
+  const hasUsageBadge = !!usageSummaryLabel || !!usageCostLabel;
   const usageUpdatedLabel = useMemo(() => {
     if (!taskUsage?.updatedAt || !Number.isFinite(taskUsage.updatedAt)) return null;
     return new Date(taskUsage.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }, [taskUsage]);
+
+  const buildPtyEnv = useCallback((controlTaskUrl: string, controlAuthToken?: string) => {
+    const customEnv: Record<string, string> = {
+      MULTI_AGENT_IDE_URL: controlTaskUrl || fallbackTaskControlUrl,
+      MULTI_AGENT_IDE_TOKEN: controlAuthToken || '',
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      TERM_PROGRAM: 'Forkline',
+      FORCE_COLOR: '1',
+      CLICOLOR: '1',
+      CLICOLOR_FORCE: '1',
+      FORKLINE_MCP_ENABLED: mcpEnabled ? '1' : '0',
+      FORKLINE_MCP_CONFIG_PATH: '.agent_cache/mcp.json',
+      FORKLINE_SPEC_PATH: '.agent_cache/FORKLINE_SPEC.md',
+      FORKLINE_PACKAGE_STORE_STRATEGY: packageStoreStrategy || 'off',
+      FORKLINE_SANDBOX_MODE: sandboxMode || 'off',
+      FORKLINE_NETWORK_GUARD: networkGuard || 'off'
+    };
+    if (pnpmStorePath?.trim()) {
+      customEnv.FORKLINE_PNPM_STORE_PATH = pnpmStorePath.trim();
+    }
+    if (sharedCacheRoot?.trim()) {
+      customEnv.FORKLINE_SHARED_CACHE_ROOT = sharedCacheRoot.trim();
+    }
+
+    if (envVars) {
+      envVars.split('\n').forEach(line => {
+        const [k, ...rest] = line.split('=');
+        const value = rest.join('=');
+        if (k && value) customEnv[k.trim()] = value.trim();
+      });
+    }
+
+    return customEnv;
+  }, [envVars, mcpEnabled, fallbackTaskControlUrl, sandboxMode, networkGuard, packageStoreStrategy, pnpmStorePath, sharedCacheRoot]);
 
   useEffect(() => {
     onBootstrappedRef.current = onBootstrapped;
   }, [onBootstrapped]);
 
   useEffect(() => {
-    const tokenQuery = controlAuthTokenRef.current ? `?token=${encodeURIComponent(controlAuthTokenRef.current)}` : '';
-    const next = `http://127.0.0.1:34567/api/task/${taskId}${tokenQuery}`;
+    const next = `http://127.0.0.1:34567/api/task/${taskId}`;
     controlTaskUrlRef.current = next;
   }, [taskId]);
+
+  useEffect(() => {
+    const applyTheme = () => {
+      const term = terminalInstance.current;
+      if (!term) return;
+      const cssVars = getComputedStyle(document.documentElement);
+      const terminalBackground = cssVars.getPropertyValue('--xterm-bg').trim() || '#000000';
+      const terminalForeground = cssVars.getPropertyValue('--xterm-fg').trim() || '#e5e5e5';
+      const terminalCursor = cssVars.getPropertyValue('--xterm-cursor').trim() || '#ffffff';
+      const terminalSelection = cssVars.getPropertyValue('--xterm-selection').trim() || 'rgba(255, 255, 255, 0.2)';
+      term.options.theme = {
+        background: terminalBackground,
+        foreground: terminalForeground,
+        cursor: terminalCursor,
+        cursorAccent: '#000000',
+        selectionBackground: terminalSelection,
+        black: '#1f2937',
+        red: '#ef4444',
+        green: '#22c55e',
+        yellow: '#eab308',
+        blue: '#3b82f6',
+        magenta: '#d946ef',
+        cyan: '#06b6d4',
+        white: '#e5e7eb',
+        brightBlack: '#6b7280',
+        brightRed: '#f87171',
+        brightGreen: '#4ade80',
+        brightYellow: '#facc15',
+        brightBlue: '#60a5fa',
+        brightMagenta: '#e879f9',
+        brightCyan: '#22d3ee',
+        brightWhite: '#ffffff'
+      };
+      try {
+        term.refresh(0, term.rows - 1);
+      } catch {
+        // Ignore transient refresh issues while terminal is mounting.
+      }
+    };
+
+    applyTheme();
+    const observer = new MutationObserver(() => {
+      applyTheme();
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
 
   useEffect(() => {
     if (!terminalRef.current || isInitialized.current) return;
@@ -103,13 +195,18 @@ const Terminal: React.FC<TerminalProps> = ({
       if (rect.width === 0 || rect.height === 0) return false;
 
       try {
+        const cssVars = getComputedStyle(document.documentElement);
+        const terminalBackground = cssVars.getPropertyValue('--xterm-bg').trim() || '#000000';
+        const terminalForeground = cssVars.getPropertyValue('--xterm-fg').trim() || '#e5e5e5';
+        const terminalCursor = cssVars.getPropertyValue('--xterm-cursor').trim() || '#ffffff';
+        const terminalSelection = cssVars.getPropertyValue('--xterm-selection').trim() || 'rgba(255, 255, 255, 0.2)';
         term = new XTerm({
           theme: {
-            background: '#000000',
-            foreground: '#e5e5e5',
-            cursor: '#ffffff',
+            background: terminalBackground,
+            foreground: terminalForeground,
+            cursor: terminalCursor,
             cursorAccent: '#000000',
-            selectionBackground: 'rgba(255, 255, 255, 0.2)',
+            selectionBackground: terminalSelection,
             black: '#1f2937',
             red: '#ef4444',
             green: '#22c55e',
@@ -179,23 +276,8 @@ const Terminal: React.FC<TerminalProps> = ({
           return true;
         });
 
-        const customEnv: Record<string, string> = {
-          MULTI_AGENT_IDE_URL: controlTaskUrlRef.current,
-          TERM: 'xterm-256color',
-          COLORTERM: 'truecolor',
-          TERM_PROGRAM: 'Forkline',
-          FORCE_COLOR: '1',
-          CLICOLOR: '1',
-          CLICOLOR_FORCE: '1'
-        };
-
-        if (envVars) {
-          envVars.split('\n').forEach(line => {
-            const [k, ...rest] = line.split('=');
-            const value = rest.join('=');
-            if (k && value) customEnv[k.trim()] = value.trim();
-          });
-        }
+        let customEnv = buildPtyEnv(controlTaskUrlRef.current);
+        ptyEnvRef.current = customEnv;
 
         term.onData(data => {
           window.electronAPI.writePty(taskId, data);
@@ -203,20 +285,9 @@ const Terminal: React.FC<TerminalProps> = ({
 
         removePtyListener = window.electronAPI.onPtyData(taskId, (data) => {
           term?.write(data);
-          recentOutputRef.current = `${recentOutputRef.current}${data}`.slice(-MAX_RECENT_OUTPUT);
-          const tail = stripAnsi(recentOutputRef.current).replace(/\r/g, '');
-          if (shellPromptPattern.test(tail) || /command not found|is not recognized as an internal or external command/i.test(tail)) {
-            quickActionModeRef.current = 'shell';
-            return;
-          }
-          if (
-            /thinking|tokens|context window|╭|╰|assistant|user|\/ask/i.test(tail)
-            || (Date.now() - lastAgentLaunchAtRef.current < 30_000)
-          ) {
-            quickActionModeRef.current = 'agent';
-          }
         });
-        removePtyStateListener = window.electronAPI.onPtyState(taskId, ({ created }) => {
+        removePtyStateListener = window.electronAPI.onPtyState(taskId, ({ created, running }) => {
+          ptyRunningRef.current = !!running;
           if (didBootstrap) return;
           didBootstrap = true;
           const shouldRelaunchAfterRestart = !!created && !shouldBootstrap;
@@ -229,28 +300,59 @@ const Terminal: React.FC<TerminalProps> = ({
           }
           setTimeout(() => {
             const taskControlUrl = controlTaskUrlRef.current;
-            const apiDoc = `IDE Capabilities API\n--------------------\nYou are running inside Forkline.\nYou can interact with the IDE by sending POST requests to the local control server.\n\nBase URL: ${taskControlUrl}\nEnvironment Variable Alias: $MULTI_AGENT_IDE_URL\nCurrent Permissions:\n- Merge Request: ${capabilities?.autoMerge ? 'Auto-Approve' : 'Requires Human Approval'}\n\nEndpoints:\n1. POST ${taskControlUrl}/merge\n2. POST ${taskControlUrl}/todos\n3. POST ${taskControlUrl}/message\n4. POST ${taskControlUrl}/usage (or /metrics)\n   Payload (example): {"contextTokens": 10240, "contextWindow": 200000, "promptTokens": 640, "completionTokens": 220, "totalTokens": 860}\n`;
+            const apiDoc = `IDE Capabilities API\n--------------------\nYou are running inside Forkline.\nYou can interact with the IDE by sending POST requests to the local control server.\n\nBase URL: ${taskControlUrl}\nAuthentication:\n- Header: x-forkline-token: $MULTI_AGENT_IDE_TOKEN\n- Alternate: Authorization: Bearer $MULTI_AGENT_IDE_TOKEN\nCurrent Permissions:\n- Merge Request: ${capabilities?.autoMerge ? 'Auto-Approve' : 'Requires Human Approval'}\n\nWorkspace Metadata Paths:\n- Living Spec (if available): .agent_cache/FORKLINE_SPEC.md\n- Memory Context: .agent_cache/agent_memory.md\n\nEndpoints:\n1. POST ${taskControlUrl}/merge\n2. POST ${taskControlUrl}/todos\n3. POST ${taskControlUrl}/message\n4. POST ${taskControlUrl}/usage (or /metrics)\n\ncurl example:\ncurl -s -H \"x-forkline-token: $MULTI_AGENT_IDE_TOKEN\" -H \"content-type: application/json\" -X POST ${taskControlUrl}/todos -d '{\"todos\":[{\"id\":\"1\",\"title\":\"Implement fix\",\"status\":\"in_progress\"}]}'\n`;
             void window.electronAPI
-              .prepareAgentWorkspace(cwd, context || '', mcpServers || '', apiDoc)
-              .catch((err) => {
-                console.error('Failed to prepare workspace metadata:', err);
-              })
-              .finally(() => {
+              .prepareAgentWorkspace(cwd, projectPath, context || '', mcpServers || '', apiDoc, livingSpecPreference)
+              .then((prepRes) => {
+                const prepareSucceeded = prepRes?.success !== false;
+                if (!prepareSucceeded) {
+                  const message = prepRes?.error ? `Workspace metadata warning: ${prepRes.error}` : 'Workspace metadata preparation failed.';
+                  term?.writeln(`\r\n[orchestrator] ${message}`);
+                }
+
+                const launchPlan = buildAgentLaunchPlan(agentCommand, prompt, {
+                  mcpEnabled: !!mcpEnabled,
+                  hasMcpConfig: !!mcpServers?.trim() && prepareSucceeded,
+                  mcpConfigPath: '.agent_cache/mcp.json'
+                });
+                if (launchPlan.mcpStatus !== 'disabled' && launchPlan.mcpMessage) {
+                  term?.writeln(`\r\n[orchestrator] ${launchPlan.mcpMessage}`);
+                }
+
                 if (prompt) {
-                  const quotedPrompt = shellQuote(prompt);
-                  window.electronAPI.writePty(taskId, `clear && echo -e "\\033[1;37m[Orchestrator]\\033[0m Bootstrapping task..." && ${agentCommand} ${quotedPrompt}\r`);
+                  window.electronAPI.writePty(taskId, `clear && echo -e "\\033[1;37m[Orchestrator]\\033[0m Bootstrapping task..." && ${launchPlan.command}\r`);
                 } else {
-                  window.electronAPI.writePty(taskId, `clear && ${agentCommand}\r`);
+                  window.electronAPI.writePty(taskId, `clear && ${launchPlan.command}\r`);
                 }
                 lastAgentLaunchAtRef.current = Date.now();
-                quickActionModeRef.current = 'agent';
+                onBootstrappedRef.current?.();
+              })
+              .catch((err) => {
+                console.error('Failed to prepare workspace metadata:', err);
+                term?.writeln('\r\n[orchestrator] Workspace metadata setup failed. Continuing without MCP injection.');
+
+                const launchPlan = buildAgentLaunchPlan(agentCommand, prompt, {
+                  mcpEnabled: !!mcpEnabled,
+                  hasMcpConfig: false,
+                  mcpConfigPath: '.agent_cache/mcp.json'
+                });
+                if (launchPlan.mcpStatus !== 'disabled' && launchPlan.mcpMessage) {
+                  term?.writeln(`\r\n[orchestrator] ${launchPlan.mcpMessage}`);
+                }
+
+                if (prompt) {
+                  window.electronAPI.writePty(taskId, `clear && echo -e "\\033[1;37m[Orchestrator]\\033[0m Bootstrapping task..." && ${launchPlan.command}\r`);
+                } else {
+                  window.electronAPI.writePty(taskId, `clear && ${launchPlan.command}\r`);
+                }
+                lastAgentLaunchAtRef.current = Date.now();
                 onBootstrappedRef.current?.();
               });
           }, 200);
         });
         removePtyExitListener = window.electronAPI.onPtyExit(taskId, ({ exitCode, signal }) => {
+          ptyRunningRef.current = false;
           term?.writeln(`\r\n[orchestrator] PTY exited (code=${exitCode ?? 'null'} signal=${signal ?? 'none'}).`);
-          quickActionModeRef.current = 'unknown';
         });
 
         void Promise.all([
@@ -262,15 +364,17 @@ const Terminal: React.FC<TerminalProps> = ({
             const resolvedBaseUrl = trimmed || 'http://127.0.0.1:34567';
             const normalizedToken = typeof authToken === 'string' ? authToken.trim() : '';
             controlAuthTokenRef.current = normalizedToken;
-            const tokenQuery = normalizedToken ? `?token=${encodeURIComponent(normalizedToken)}` : '';
-            const resolvedTaskUrl = `${resolvedBaseUrl}/api/task/${taskId}${tokenQuery}`;
+            const resolvedTaskUrl = `${resolvedBaseUrl}/api/task/${taskId}`;
             controlTaskUrlRef.current = resolvedTaskUrl;
-            customEnv.MULTI_AGENT_IDE_URL = resolvedTaskUrl;
+            customEnv = buildPtyEnv(resolvedTaskUrl, normalizedToken);
+            ptyEnvRef.current = customEnv;
           })
           .catch(() => {
-            customEnv.MULTI_AGENT_IDE_URL = fallbackTaskControlUrl;
+            customEnv = buildPtyEnv(fallbackTaskControlUrl, '');
+            ptyEnvRef.current = customEnv;
           })
           .finally(() => {
+            ptyEnvRef.current = customEnv;
             window.electronAPI.createPty(taskId, cwd, customEnv);
           });
 
@@ -321,10 +425,6 @@ const Terminal: React.FC<TerminalProps> = ({
       }
       if (initializeObserver) initializeObserver.disconnect();
       if (layoutObserver) layoutObserver.disconnect();
-      if (pendingStealthTimeoutRef.current !== null) {
-        clearTimeout(pendingStealthTimeoutRef.current);
-        pendingStealthTimeoutRef.current = null;
-      }
       if (removePtyListener) {
         removePtyListener();
       } else {
@@ -340,29 +440,28 @@ const Terminal: React.FC<TerminalProps> = ({
       if (term) term.dispose();
       isInitialized.current = false;
     };
-  }, [taskId, cwd]);
+  }, [taskId, cwd, projectPath, livingSpecPreference]);
 
-  const executeMacro = (cmd: string) => {
-    window.electronAPI.writePty(taskId, `${cmd}\r`);
+  const focusTerminal = () => {
     requestAnimationFrame(() => {
       terminalInstance.current?.focus();
     });
+  };
+
+  const sendRaw = (data: string) => {
+    if (!data) return;
+    window.electronAPI.writePty(taskId, data);
+    focusTerminal();
+  };
+
+  const sendLine = (line: string, clearLine = false) => {
+    const prefix = clearLine && line ? '\u0015' : '';
+    window.electronAPI.writePty(taskId, `${prefix}${line}\r`);
+    focusTerminal();
   };
 
   const writeOrchestratorHint = (message: string) => {
     terminalInstance.current?.writeln(`\r\n[orchestrator] ${message}`);
-  };
-
-  const dispatchStableInput = (text: string) => {
-    const normalized = text
-      .replace(/\$MULTI_AGENT_IDE_URL/g, controlTaskUrlRef.current)
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (!normalized) return;
-    window.electronAPI.writePty(taskId, `${normalized}\r`);
-    requestAnimationFrame(() => {
-      terminalInstance.current?.focus();
-    });
   };
 
   const recordQuickAction = (action: string, payload: Record<string, unknown> = {}) => {
@@ -372,91 +471,104 @@ const Terminal: React.FC<TerminalProps> = ({
   const keepTerminalFocus = (event: React.MouseEvent<HTMLButtonElement>) => {
     // Prevent button from retaining focus so Enter keeps going to xterm.
     event.preventDefault();
+    event.stopPropagation();
     event.currentTarget.blur();
-    requestAnimationFrame(() => {
-      terminalInstance.current?.focus();
-    });
+    focusTerminal();
   };
 
-  const dispatchAgentInstruction = (payload: string) => {
-    if (!payload.trim()) return;
-    if (isAiderAgent) {
-      dispatchStableInput(`/ask ${payload}`);
+  const blurButtonOnFocus = (event: React.FocusEvent<HTMLButtonElement>) => {
+    event.currentTarget.blur();
+    focusTerminal();
+  };
+
+  const ensurePtyRunning = useCallback((continuation: () => void) => {
+    if (ptyRunningRef.current) {
+      continuation();
       return;
     }
-    dispatchStableInput(payload);
-  };
+    writeOrchestratorHint('Restoring terminal process for this task.');
+    const relaunchEnv = ptyEnvRef.current || buildPtyEnv(controlTaskUrlRef.current || fallbackTaskControlUrl);
+    ptyEnvRef.current = relaunchEnv;
+    window.electronAPI.createPty(taskId, cwd, relaunchEnv);
+    window.setTimeout(continuation, 220);
+  }, [cwd, taskId, buildPtyEnv, fallbackTaskControlUrl]);
 
-  const relaunchAgentStealth = (postInstruction?: string) => {
-    if (pendingStealthTimeoutRef.current !== null) {
-      clearTimeout(pendingStealthTimeoutRef.current);
-      pendingStealthTimeoutRef.current = null;
+  const runQuickActionPlan = useCallback((steps: QuickActionStep[]) => {
+    for (const step of steps) {
+      if (step.kind === 'hint') {
+        writeOrchestratorHint(step.message);
+        continue;
+      }
+      if (step.kind === 'send') {
+        sendRaw(step.data);
+        continue;
+      }
+      if (step.kind === 'send_line') {
+        const normalized = step.line.replace(/\$MULTI_AGENT_IDE_URL/g, controlTaskUrlRef.current).trim();
+        if (!normalized) continue;
+        sendLine(normalized, step.clearLine ?? false);
+        continue;
+      }
+      if (step.kind === 'launch_agent') {
+        sendLine(agentCommand, true);
+        lastAgentLaunchAtRef.current = Date.now();
+        if (step.postInstruction?.trim()) {
+          window.setTimeout(() => {
+            sendLine(step.postInstruction!.trim(), true);
+          }, 900);
+        }
+      }
     }
-    window.electronAPI.writePty(taskId, `${agentCommand}\r`);
-    lastAgentLaunchAtRef.current = Date.now();
-    quickActionModeRef.current = 'agent';
-    if (postInstruction && postInstruction.trim()) {
-      pendingStealthTimeoutRef.current = window.setTimeout(() => {
-        dispatchAgentInstruction(postInstruction);
-        pendingStealthTimeoutRef.current = null;
-      }, 900);
-    }
-  };
+  }, [agentCommand]);
 
-  const sendAgentInstruction = (lines: string[]) => {
+  const dispatchQuickAction = useCallback((action: QuickActionId) => {
     const now = Date.now();
-    if (now - lastQuickActionAtRef.current < 250) return;
+    if (now - lastQuickActionAtRef.current < 180) return;
     lastQuickActionAtRef.current = now;
 
-    const payload = lines.join(' ');
-    dispatchAgentInstruction(payload);
-  };
+    const plan = resolveQuickActionPlan({
+      action,
+      agentCommand,
+      isBlocked: !!isBlocked
+    });
+    recordQuickAction(action, {
+      target: plan.target,
+      profile: plan.capabilities.profile
+    });
+
+    const needsPty = plan.steps.some(step => step.kind !== 'hint');
+    if (!needsPty) {
+      runQuickActionPlan(plan.steps);
+      return;
+    }
+
+    ensurePtyRunning(() => {
+      runQuickActionPlan(plan.steps);
+    });
+  }, [agentCommand, ensurePtyRunning, isBlocked, runQuickActionPlan]);
 
   const handleQuickTestFix = () => {
-    recordQuickAction('test_and_fix');
-    const mode = isBlocked ? 'blocked' : quickActionModeRef.current;
-    const instruction = 'Run relevant tests, fix failures, and summarize the changes briefly.';
-    if (mode === 'blocked') {
-      executeMacro('y');
-      return;
-    }
-    if (mode === 'shell') {
-      writeOrchestratorHint('Relaunching agent before running test & fix.');
-      relaunchAgentStealth(instruction);
-      return;
-    }
-    sendAgentInstruction([instruction]);
+    dispatchQuickAction('test_and_fix');
   };
 
   const handleQuickResume = () => {
-    recordQuickAction('resume');
-    const mode = isBlocked ? 'blocked' : quickActionModeRef.current;
-    if (mode === 'blocked') {
-      executeMacro('y');
-      return;
-    }
-    if (mode === 'shell') {
-      writeOrchestratorHint('Relaunching agent for this session.');
-      relaunchAgentStealth();
-      return;
-    }
-    executeMacro('');
+    dispatchQuickAction('resume');
   };
 
   const handleQuickPause = () => {
-    recordQuickAction('pause');
-    window.electronAPI.writePty(taskId, '\u0003');
-    requestAnimationFrame(() => {
-      terminalInstance.current?.focus();
-    });
+    dispatchQuickAction('pause');
+  };
+
+  const handleQuickPlan = () => {
+    dispatchQuickAction('plan');
   };
 
   const injectAgentCommand = (filePath: string) => {
-    if (agentCommand.toLowerCase().includes('aider')) {
-      executeMacro(`/add ${filePath}`);
+    if (capabilitiesProfile.profile === 'aider') {
+      sendLine(`/add ${filePath}`);
       return;
     }
-    executeMacro(`Please analyze this image and use it as task context: ${filePath}`);
+    sendLine(`Please analyze this image and use it as task context: ${filePath}`);
   };
 
   const handlePaste = async (e: React.ClipboardEvent) => {
@@ -491,35 +603,13 @@ const Terminal: React.FC<TerminalProps> = ({
   };
 
   const handleQuickStatus = () => {
-    recordQuickAction('status');
-    const mode = isBlocked ? 'blocked' : quickActionModeRef.current;
-    if (mode === 'blocked') {
-      writeOrchestratorHint('Status is unavailable while the agent is waiting for approval.');
-      return;
-    }
-    if (mode === 'shell') {
-      executeMacro('git status --short && echo "---" && git branch --show-current');
-      return;
-    }
-    if (isAiderAgent) {
-      executeMacro('/run git status --short && echo "---" && git branch --show-current');
-      return;
-    }
-
-    if (isPromptAgent) {
-      sendAgentInstruction([
-        'Show the current git status and branch for this worktree.'
-      ]);
-      return;
-    }
-
-    executeMacro('git status --short && echo "---" && git branch --show-current');
+    dispatchQuickAction('status');
   };
 
   return (
-    <div className="w-full h-full flex flex-col relative bg-[#000000] rounded-xl overflow-hidden" onPaste={handlePaste}>
+    <div className="w-full h-full flex flex-col relative bg-[var(--xterm-bg)] rounded-xl overflow-hidden" onPaste={handlePaste}>
       <div
-        className="flex-1 relative overflow-hidden bg-[#000000]"
+        className="flex-1 relative overflow-hidden bg-[var(--xterm-bg)]"
         onMouseDown={() => {
           terminalInstance.current?.focus();
         }}
@@ -527,7 +617,7 @@ const Terminal: React.FC<TerminalProps> = ({
         <div ref={terminalRef} className="w-full h-full absolute inset-0" />
       </div>
 
-      <div className="p-3 border-t border-[#1a1a1a] bg-[#050505] flex flex-col shrink-0 relative z-30">
+      <div className="p-3 border-t border-[var(--panel-border)] bg-[var(--panel)] flex flex-col shrink-0 relative z-30">
         {isBlocked && (
           <div className="mb-3 rounded-lg border border-red-900/70 bg-[#1a0505] px-3 py-2 flex items-center justify-between gap-3">
             <div className="min-w-0 flex items-center">
@@ -537,10 +627,10 @@ const Terminal: React.FC<TerminalProps> = ({
               </span>
             </div>
             <div className="flex items-center space-x-2 flex-shrink-0">
-              <button onMouseDown={keepTerminalFocus} onClick={() => executeMacro('y')} className="btn-primary px-3 py-1.5 rounded text-[11px] font-mono">
+              <button type="button" tabIndex={-1} onFocus={blurButtonOnFocus} onMouseDown={keepTerminalFocus} onClick={() => sendLine('y', false)} className="btn-primary px-3 py-1.5 rounded text-[11px] font-mono">
                 approve (y)
               </button>
-              <button onMouseDown={keepTerminalFocus} onClick={() => executeMacro('n')} className="btn-ghost border border-[#262626] px-3 py-1.5 rounded text-[11px] font-mono">
+              <button type="button" tabIndex={-1} onFocus={blurButtonOnFocus} onMouseDown={keepTerminalFocus} onClick={() => sendLine('n', false)} className="btn-ghost border border-[#262626] px-3 py-1.5 rounded text-[11px] font-mono">
                 reject (n)
               </button>
             </div>
@@ -550,14 +640,18 @@ const Terminal: React.FC<TerminalProps> = ({
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2 pb-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[10px] border border-[#1f1f1f] bg-[#0a0a0a] text-[#9ca3af] px-2 py-1 rounded font-mono">
-                {usageSummaryLabel}
-              </span>
-              <span className="text-[10px] border border-[#1f1f1f] bg-[#0a0a0a] text-[#9ca3af] px-2 py-1 rounded font-mono">
-                {usageCostLabel}
-              </span>
+              {usageSummaryLabel && (
+                <span className="text-[10px] border border-[#1f1f1f] bg-[#0a0a0a] text-[#9ca3af] px-2 py-1 rounded font-mono">
+                  {usageSummaryLabel}
+                </span>
+              )}
+              {usageCostLabel && (
+                <span className="text-[10px] border border-[#1f1f1f] bg-[#0a0a0a] text-[#9ca3af] px-2 py-1 rounded font-mono">
+                  {usageCostLabel}
+                </span>
+              )}
             </div>
-            {usageUpdatedLabel && (
+            {hasUsageBadge && usageUpdatedLabel && (
               <span className="text-[10px] text-[#6b7280] font-mono">
                 usage {usageUpdatedLabel}
               </span>
@@ -566,6 +660,9 @@ const Terminal: React.FC<TerminalProps> = ({
 
           <div className="flex flex-wrap items-center gap-2">
             <button
+              type="button"
+              tabIndex={-1}
+              onFocus={blurButtonOnFocus}
               onMouseDown={keepTerminalFocus}
               onClick={handleQuickStatus}
               title="Request git status snapshot for this task"
@@ -574,6 +671,9 @@ const Terminal: React.FC<TerminalProps> = ({
               <TerminalSquare size={12} className="mr-2 text-[#525252]" /> status
             </button>
             <button
+              type="button"
+              tabIndex={-1}
+              onFocus={blurButtonOnFocus}
               onMouseDown={keepTerminalFocus}
               onClick={handleQuickResume}
               title="Continue the current task without restarting context"
@@ -582,6 +682,9 @@ const Terminal: React.FC<TerminalProps> = ({
               <Play size={12} className="mr-2 text-[#525252]" /> resume
             </button>
             <button
+              type="button"
+              tabIndex={-1}
+              onFocus={blurButtonOnFocus}
               onMouseDown={keepTerminalFocus}
               onClick={handleQuickPause}
               title="Send Ctrl+C to interrupt current command/agent action"
@@ -590,6 +693,9 @@ const Terminal: React.FC<TerminalProps> = ({
               <Pause size={12} className="mr-2 text-[#525252]" /> pause
             </button>
             <button
+              type="button"
+              tabIndex={-1}
+              onFocus={blurButtonOnFocus}
               onMouseDown={keepTerminalFocus}
               onClick={handleQuickTestFix}
               title="Run relevant checks and fix failures"
@@ -598,8 +704,22 @@ const Terminal: React.FC<TerminalProps> = ({
               <Code size={12} className="mr-2 text-[#525252]" /> test & fix
             </button>
             <button
+              type="button"
+              tabIndex={-1}
+              onFocus={blurButtonOnFocus}
               onMouseDown={keepTerminalFocus}
-              onClick={onHandover}
+              onClick={handleQuickPlan}
+              title="Create a concise execution plan"
+              className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center"
+            >
+              <Map size={12} className="mr-2 text-[#525252]" /> plan
+            </button>
+            <button
+              type="button"
+              tabIndex={-1}
+              onFocus={blurButtonOnFocus}
+              onMouseDown={keepTerminalFocus}
+              onClick={() => onHandover?.()}
               title="Hand over this task to another agent model"
               className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center"
             >
@@ -607,16 +727,22 @@ const Terminal: React.FC<TerminalProps> = ({
             </button>
             <div className="ml-auto flex items-center gap-2">
               <button
+                type="button"
+                tabIndex={-1}
+                onFocus={blurButtonOnFocus}
                 onMouseDown={keepTerminalFocus}
-                onClick={onMerge}
+                onClick={() => onMerge?.()}
                 title="Review and merge this worktree"
                 className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center text-emerald-400 hover:text-emerald-300"
               >
                 <GitMerge size={12} className="mr-2 text-emerald-500" /> merge
               </button>
               <button
+                type="button"
+                tabIndex={-1}
+                onFocus={blurButtonOnFocus}
                 onMouseDown={keepTerminalFocus}
-                onClick={onDelete}
+                onClick={() => onDelete?.()}
                 title="Delete this branch and worktree"
                 className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center text-red-400 hover:text-red-300"
               >

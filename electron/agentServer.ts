@@ -8,8 +8,21 @@ export class AgentControlServer {
   private readonly authToken = crypto.randomBytes(24).toString('base64url');
   private responseCallbacks: Map<string, http.ServerResponse> = new Map();
   private readonly allowedActions = new Set(['merge', 'todos', 'message', 'usage', 'metrics']);
+  private mainWindow: BrowserWindow;
 
-  constructor(private mainWindow: BrowserWindow) {
+  private secureTokenEquals(a: string, b: string) {
+    const left = Buffer.from(a, 'utf8');
+    const right = Buffer.from(b, 'utf8');
+    if (left.length !== right.length) return false;
+    try {
+      return crypto.timingSafeEqual(left, right);
+    } catch {
+      return false;
+    }
+  }
+
+  constructor(mainWindow: BrowserWindow) {
+    this.mainWindow = mainWindow;
     this.server = http.createServer((req, res) => {
       const remoteAddress = req.socket.remoteAddress || '';
       const isLoopback = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
@@ -39,14 +52,15 @@ export class AgentControlServer {
         res.end(JSON.stringify({ error: 'Invalid request URL.' }));
         return;
       }
-      const tokenFromQuery = reqUrl.searchParams.get('token');
+      const authHeader = Array.isArray(req.headers.authorization) ? req.headers.authorization[0] : req.headers.authorization;
       const tokenFromHeader = Array.isArray(req.headers['x-forkline-token'])
         ? req.headers['x-forkline-token'][0]
         : req.headers['x-forkline-token'];
-      const providedToken = (typeof tokenFromHeader === 'string' && tokenFromHeader.trim())
-        ? tokenFromHeader.trim()
-        : (tokenFromQuery || '').trim();
-      if (!providedToken || providedToken !== this.authToken) {
+      const bearerToken = (typeof authHeader === 'string' && authHeader.startsWith('Bearer '))
+        ? authHeader.slice('Bearer '.length).trim()
+        : '';
+      const providedToken = bearerToken || (typeof tokenFromHeader === 'string' ? tokenFromHeader.trim() : '');
+      if (!providedToken || !this.secureTokenEquals(providedToken, this.authToken)) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized control request.' }));
         return;
@@ -175,5 +189,9 @@ export class AgentControlServer {
 
   public getAuthToken() {
     return this.authToken;
+  }
+
+  public setMainWindow(mainWindow: BrowserWindow) {
+    this.mainWindow = mainWindow;
   }
 }

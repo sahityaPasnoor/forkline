@@ -12,6 +12,7 @@ const Routes = {
   GIT_VALIDATE: '/v1/git/validate',
   GIT_WORKTREE_CREATE: '/v1/git/worktree/create',
   GIT_WORKTREE_LIST: '/v1/git/worktree/list',
+  GIT_BRANCH_LIST: '/v1/git/branches/list',
   GIT_WORKTREE_REMOVE: '/v1/git/worktree/remove',
   GIT_WORKTREE_MERGE: '/v1/git/worktree/merge',
   PTY_CREATE: '/v1/pty/create',
@@ -23,4 +24,11 @@ const Routes = {
   PTY_SESSIONS: '/v1/pty/sessions'
 };
 
-module.exports = { Events, Routes };
+const { detectAgentCapabilities, resolveQuickActionPlan } = require('./quick-actions');
+
+module.exports = {
+  Events,
+  Routes,
+  detectAgentCapabilities,
+  resolveQuickActionPlan
+};

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { FolderOpen, FolderTree, Plus, PlayCircle, X } from 'lucide-react';
+import { FolderOpen, FolderTree, Plus, PlayCircle, Trash2, X } from 'lucide-react';
 import type { TaskTab } from '../models/orchestrator';
 
 interface ProjectManagerModalProps {
@@ -10,6 +10,7 @@ interface ProjectManagerModalProps {
   tabs: TaskTab[];
   onSwitchProject: (projectPath: string) => void;
   onCreateProjectPath: (projectPath: string, activate: boolean) => void;
+  onRemoveProjectPath: (projectPath: string) => void;
   onBrowseProject: (activate: boolean) => Promise<void>;
 }
 
@@ -36,6 +37,7 @@ const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({
   tabs,
   onSwitchProject,
   onCreateProjectPath,
+  onRemoveProjectPath,
   onBrowseProject
 }) => {
   const [newProjectPath, setNewProjectPath] = useState('');
@@ -82,6 +84,16 @@ const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({
               <PlayCircle size={11} className="mr-1" />
               switch
             </button>
+            {!isCurrent && (
+              <button
+                onClick={() => onRemoveProjectPath(projectPath)}
+                className="btn-ghost px-2 py-1 rounded text-[10px] uppercase tracking-wider flex items-center text-red-300 hover:text-red-200"
+                title="Remove from workspace list (does not delete files)"
+              >
+                <Trash2 size={11} className="mr-1" />
+                remove
+              </button>
+            )}
           </div>
         </div>
 
@@ -111,10 +123,19 @@ const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({
 
         <div className="px-5 py-3 border-b border-[#1a1a1a]">
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => {
+                void onBrowseProject(false);
+              }}
+              className="btn-primary px-3 py-2 rounded text-[11px] uppercase tracking-wider flex items-center"
+            >
+              <FolderOpen size={12} className="mr-1.5" />
+              browse project
+            </button>
             <input
               value={newProjectPath}
               onChange={(event) => setNewProjectPath(event.target.value)}
-              placeholder="/absolute/path/to/project"
+              placeholder="Optional: paste project path manually"
               className="input-stealth px-3 py-2 rounded text-xs font-mono min-w-[20rem] flex-1"
             />
             <button
@@ -133,9 +154,9 @@ const ProjectManagerModal: React.FC<ProjectManagerModalProps> = ({
               onClick={() => {
                 void onBrowseProject(true).then(() => onClose());
               }}
-              className="btn-primary px-3 py-2 rounded text-[11px] uppercase tracking-wider flex items-center"
+              className="btn-ghost px-3 py-2 rounded text-[11px] uppercase tracking-wider flex items-center"
             >
-              <FolderOpen size={12} className="mr-1.5" />
+              <PlayCircle size={12} className="mr-1.5" />
               browse & switch
             </button>
           </div>

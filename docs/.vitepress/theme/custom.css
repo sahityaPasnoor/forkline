@@ -9,22 +9,52 @@
   --vp-c-brand-3: #14b8a6;
   --vp-c-brand-soft: rgba(15, 118, 110, 0.16);
 
-  --vp-c-bg: #f8fbfb;
-  --vp-c-bg-alt: #eef6f5;
-  --vp-c-bg-soft: #e6f0ef;
+  --vp-c-bg: #f3f7f8;
+  --vp-c-bg-alt: #e9f1f2;
+  --vp-c-bg-soft: #e1ebee;
+  --vp-c-text-1: #0f172a;
+  --vp-c-text-2: #334155;
+  --vp-c-divider: rgba(15, 23, 42, 0.12);
+
+  --docs-glow-1: rgba(15, 118, 110, 0.15);
+  --docs-glow-2: rgba(2, 132, 199, 0.12);
+  --docs-feature-border: rgba(15, 23, 42, 0.1);
+  --docs-feature-bg: linear-gradient(155deg, rgba(255, 255, 255, 0.95), rgba(228, 241, 243, 0.95));
+  --docs-nav-bg: rgba(243, 247, 248, 0.84);
 
   --vp-home-hero-name-color: transparent;
-  --vp-home-hero-name-background: linear-gradient(120deg, #0f172a 15%, #0f766e 45%, #0d9488 80%);
-  --vp-home-hero-image-background-image: radial-gradient(circle at 30% 40%, rgba(15, 118, 110, 0.42), rgba(30, 64, 175, 0.15));
-  --vp-home-hero-image-filter: blur(54px);
+  --vp-home-hero-name-background: linear-gradient(120deg, var(--vp-c-text-1) 18%, var(--vp-c-brand-1) 45%, var(--vp-c-brand-2) 80%);
+  --vp-home-hero-image-background-image: radial-gradient(circle at 30% 40%, var(--docs-glow-1), var(--docs-glow-2));
+  --vp-home-hero-image-filter: blur(56px);
+}
+
+.dark {
+  --vp-c-brand-1: #2dd4bf;
+  --vp-c-brand-2: #14b8a6;
+  --vp-c-brand-3: #0d9488;
+  --vp-c-brand-soft: rgba(45, 212, 191, 0.22);
+
+  --vp-c-bg: #090d14;
+  --vp-c-bg-alt: #0f1723;
+  --vp-c-bg-soft: #162334;
+  --vp-c-text-1: #e2e8f0;
+  --vp-c-text-2: #94a3b8;
+  --vp-c-divider: rgba(148, 163, 184, 0.2);
+
+  --docs-glow-1: rgba(45, 212, 191, 0.19);
+  --docs-glow-2: rgba(56, 189, 248, 0.14);
+  --docs-feature-border: rgba(148, 163, 184, 0.22);
+  --docs-feature-bg: linear-gradient(160deg, rgba(15, 23, 35, 0.95), rgba(22, 35, 52, 0.96));
+  --docs-nav-bg: rgba(9, 13, 20, 0.82);
 }
 
 html,
 body {
   background:
-    radial-gradient(circle at 12% 10%, rgba(15, 118, 110, 0.1), transparent 40%),
-    radial-gradient(circle at 88% 4%, rgba(14, 116, 144, 0.12), transparent 42%),
+    radial-gradient(circle at 12% 10%, var(--docs-glow-1), transparent 40%),
+    radial-gradient(circle at 88% 4%, var(--docs-glow-2), transparent 42%),
     var(--vp-c-bg);
+  color: var(--vp-c-text-1);
 }
 
 .VPHero .image-bg {
@@ -32,16 +62,16 @@ body {
 }
 
 .VPButton.brand {
-  box-shadow: 0 9px 24px rgba(15, 118, 110, 0.25);
+  box-shadow: 0 9px 24px color-mix(in srgb, var(--vp-c-brand-1) 40%, transparent);
 }
 
 .VPFeature {
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  background: linear-gradient(155deg, rgba(255, 255, 255, 0.95), rgba(238, 246, 245, 0.95));
+  border: 1px solid var(--docs-feature-border);
+  background: var(--docs-feature-bg);
 }
 
 .vp-doc h2 {
-  border-top: 1px solid rgba(15, 23, 42, 0.1);
+  border-top: 1px solid var(--vp-c-divider);
   padding-top: 20px;
 }
 
@@ -50,13 +80,28 @@ body {
   width: 100%;
 }
 
-.vp-doc tr:nth-child(2n) {
-  background: rgba(15, 118, 110, 0.04);
+.vp-doc tr:nth-child(2n),
+.vp-doc tbody tr:nth-child(2n) {
+  background: color-mix(in srgb, var(--vp-c-brand-1) 8%, transparent);
 }
 
 .VPNavBar {
   backdrop-filter: blur(8px);
-  background-color: rgba(248, 251, 251, 0.8);
+  background-color: var(--docs-nav-bg);
+}
+
+.dark .VPNavBar {
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+
+.vp-doc pre,
+.vp-doc div[class*='language-'] {
+  border: 1px solid var(--vp-c-divider);
+}
+
+.vp-doc a:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 @media (max-width: 768px) {

@@ -33,6 +33,7 @@ export default {
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'Developer Workflow', link: '/guide/developer-workflow' },
             { text: 'Configuration', link: '/guide/configuration' },
+            { text: 'Theme Decision', link: '/guide/theme-options' },
             { text: 'Troubleshooting', link: '/guide/troubleshooting' }
           ]
         }

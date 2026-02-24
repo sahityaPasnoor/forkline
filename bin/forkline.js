@@ -35,9 +35,9 @@ if (electronBinaryPath && typeof electronBinaryPath === 'string') {
     process.exit(code ?? 0);
   });
 } else {
-  console.log('[forkline] Local electron runtime not found. Launching via npx electron@30.0.1...');
+  console.log('[forkline] Local electron runtime not found. Launching via npx electron@35.7.5...');
   const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const child = spawn(npxCommand, ['-y', 'electron@30.0.1', mainEntry], {
+  const child = spawn(npxCommand, ['-y', 'electron@35.7.5', mainEntry], {
     cwd: projectRoot,
     stdio: 'inherit',
     env: process.env

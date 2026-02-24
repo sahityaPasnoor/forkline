@@ -1,5 +1,7 @@
 # Forkline Terminal-First Blueprint
 
+> Status note (current): this is a long-term architecture blueprint. In the current product, `core` + `gui` are primary and `tui` is experimental.
+
 ## Goal
 Make Forkline a terminal-first product where:
 - `core` is open source (headless engine + API + CLI).

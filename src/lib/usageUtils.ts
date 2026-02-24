@@ -19,42 +19,42 @@ const formatUsd = (value: number) => {
 };
 
 export const formatTaskUsage = (usage?: TaskUsage) => {
-  if (!usage) return 'CTX n/a';
+  if (!usage) return null;
 
   if (typeof usage.contextTokens === 'number' && typeof usage.contextWindow === 'number' && usage.contextWindow > 0) {
     const percent = clampPercent((usage.contextTokens / usage.contextWindow) * 100);
-    return `CTX ${formatCompactNumber(usage.contextTokens)}/${formatCompactNumber(usage.contextWindow)} (${percent.toFixed(1)}%)`;
+    return `Context ${formatCompactNumber(usage.contextTokens)}/${formatCompactNumber(usage.contextWindow)} (${percent.toFixed(1)}%)`;
   }
 
   if (typeof usage.contextTokens === 'number') {
-    return `CTX ${formatCompactNumber(usage.contextTokens)}`;
+    return `Context ${formatCompactNumber(usage.contextTokens)}`;
   }
 
   if (typeof usage.totalTokens === 'number') {
-    return `TOK ${formatCompactNumber(usage.totalTokens)}`;
+    return `Tokens ${formatCompactNumber(usage.totalTokens)}`;
   }
 
   if (typeof usage.promptTokens === 'number' || typeof usage.completionTokens === 'number') {
     const inTokens = typeof usage.promptTokens === 'number' ? formatCompactNumber(usage.promptTokens) : '-';
     const outTokens = typeof usage.completionTokens === 'number' ? formatCompactNumber(usage.completionTokens) : '-';
-    return `IN ${inTokens} OUT ${outTokens}`;
+    return `Input ${inTokens} Output ${outTokens}`;
   }
 
-  return 'CTX n/a';
+  return null;
 };
 
 export const formatTaskCost = (usage?: TaskUsage) => {
-  if (!usage) return 'COST n/a';
+  if (!usage) return null;
 
   if (typeof usage.costUsd === 'number') {
-    return `COST ${formatUsd(usage.costUsd)}`;
+    return `Cost ${formatUsd(usage.costUsd)}`;
   }
 
   if (typeof usage.promptCostUsd === 'number' || typeof usage.completionCostUsd === 'number') {
     const input = typeof usage.promptCostUsd === 'number' ? formatUsd(usage.promptCostUsd) : '-';
     const output = typeof usage.completionCostUsd === 'number' ? formatUsd(usage.completionCostUsd) : '-';
-    return `COST in ${input} out ${output}`;
+    return `Cost input ${input} output ${output}`;
   }
 
-  return 'COST n/a';
+  return null;
 };
