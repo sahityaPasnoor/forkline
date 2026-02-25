@@ -1,42 +1,75 @@
 # Quick Actions
 
-Quick actions are deterministic plans that convert operator intent into PTY instructions.
+Quick actions are deterministic plans that map operator intent to PTY input steps.
 
-## Actions
+Implementation source:
+- `packages/protocol/src/quick-actions.js` (core/tui)
+- `src/lib/quickActions.ts` (renderer)
 
-- `status`
-- `resume`
-- `pause`
-- `test_and_fix`
-- `plan`
-- `context`
-- `cost`
+## Layer 1: Quickstart
 
-## Capability detection
+Core/TUI quick action execution pattern:
+1. Build action plan from `resolveQuickActionPlan(...)`.
+2. Execute each step in order (`hint`, `send`, `send_line`, `launch_agent`).
+3. Send generated terminal input through `/v1/pty/write` (core) or `electronAPI.writePty` (GUI).
 
-Agent command is classified into one profile:
+## Layer 2: Practical recipes
 
-- `aider`: supports `/ask` and `/run`
-- `prompt`: prompt-style agents (`claude`, `codex`, `gemini`, `amp`, `cursor`, `cline`, `sweep`)
-- `shell`: generic shell behavior
+- Use `status` for fast branch/dirty checks.
+- Use `test_and_fix` to run default project tests without crafting commands per repo.
+- Use `pause` to send `Ctrl+C` safely.
+- Use `resume` only after blocked prompts are resolved.
+- In GUI, use `create_pr` when branch is ready and `gh`/`glab` is installed.
+
+## Layer 3: Runtime contracts
+
+## Action support matrix
+
+| Action | Protocol (`core`/`tui`) | Renderer (`gui`) |
+|---|---|---|
+| `status` | Yes | Yes |
+| `pause` | Yes | Yes |
+| `resume` | Yes | Yes |
+| `test_and_fix` | Yes | Yes |
+| `plan` | Yes | Yes |
+| `context` | Yes | No |
+| `cost` | Yes | No |
+| `create_pr` | No | Yes |
+
+## Capability profiles
+
+Agent command is classified as:
+- `aider` (supports `/ask` and `/run` adaptation)
+- `prompt` (claude/codex/gemini/amp/cursor/cline/sweep)
+- `shell`
 
 ## Blocked-session behavior
 
-When session is blocked:
+Protocol (`packages/protocol`):
+- `resume` while blocked sends `y` without clearing line.
+- Other actions return a hint to resolve prompt first.
 
-- `resume` sends `y` without clearing line
-- other actions emit a hint and do not execute
+Renderer (`src/lib/quickActions.ts`):
+- `resume` sends a line to relaunch/continue the agent command.
+- Other actions while blocked emit a hint and do not execute.
 
-## Example planning behavior
+## PR creation behavior (GUI)
 
-| Action | Shell profile | Prompt profile |
-|---|---|---|
-| `status` | send git shell command | ask agent for git status summary |
-| `test_and_fix` | run test command chain | instruct agent to run/fix tests |
-| `plan` | sends instruction line | sends instruction line |
-| `pause` | sends `Ctrl+C` | sends `Ctrl+C` |
+`create_pr` builds a shell command that:
+- detects current branch and parent branch
+- prefers `gh pr create --fill --web`
+- falls back to `glab mr create --fill --web`
+- otherwise prints manual command instructions
 
-Implementation source:
+## Return shape
 
-- `packages/protocol/src/quick-actions.js`
-- `src/lib/quickActions.ts`
+```json
+{
+  "action": "status",
+  "target": "shell",
+  "capabilities": { "profile": "shell", "supportsAsk": false, "supportsRun": false },
+  "steps": [
+    { "kind": "send_line", "line": "git status --short && echo \"---\" && git branch --show-current" }
+  ]
+}
+```

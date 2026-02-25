@@ -54,9 +54,12 @@ export default {
           items: [
             { text: 'Core API', link: '/reference/core-api' },
             { text: 'Agent Control API', link: '/reference/agent-control-api' },
+            { text: 'Protocol API', link: '/reference/protocol-api' },
+            { text: 'TUI API (Experimental)', link: '/reference/tui-api' },
             { text: 'Event Model', link: '/reference/events' },
             { text: 'Quick Actions', link: '/reference/quick-actions' },
-            { text: 'Environment Variables', link: '/reference/environment-variables' }
+            { text: 'Environment Variables', link: '/reference/environment-variables' },
+            { text: 'Renderer IPC (Internal)', link: '/reference/renderer-ipc-internal' }
           ]
         }
       ],
@@ -66,7 +69,8 @@ export default {
           items: [
             { text: 'Security', link: '/operations/security' },
             { text: 'Release Process', link: '/operations/release' },
-            { text: 'CI/CD and Quality Gates', link: '/operations/ci-cd' }
+            { text: 'CI/CD and Quality Gates', link: '/operations/ci-cd' },
+            { text: 'Open-Source Readiness Audit (2026-02)', link: '/operations/audits/open-source-readiness-2026-02' }
           ]
         }
       ],
