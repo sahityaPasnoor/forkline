@@ -700,7 +700,7 @@ function App() {
     }
   ) => {
     if (!basePath || !sourceStatus?.valid) {
-      alert('Please select a valid base project path first.');
+      setOperationNotice('Please select a valid base project path first.');
       return;
     }
 
@@ -724,7 +724,7 @@ function App() {
 
     if (!result.success) {
       setSpawnProgress(null);
-      alert(`Git Worktree Setup Failed: ${result.error}`);
+      setOperationNotice(`Git worktree setup failed: ${result.error || 'unknown error'}.`);
       return;
     }
 
@@ -747,7 +747,7 @@ function App() {
     const tab = tabs.find(t => t.id === diffTask);
     const res = await closeTaskById(diffTask, 'merge');
     if (!res.success) {
-      alert(`Failed to merge worktree: ${res.error}`);
+      setOperationNotice(`Failed to merge worktree: ${res.error || 'unknown error'}.`);
       return;
     }
     setOperationNotice(tab ? `Merged ${getTaskDisplayName(tab)} into ${parentBranch}.` : 'Merge completed.');
@@ -762,7 +762,7 @@ function App() {
 
     const res = await closeTaskById(id, 'delete');
     if (!res.success) {
-      alert(`Failed to delete worktree: ${res.error}`);
+      setOperationNotice(`Failed to delete worktree: ${res.error || 'unknown error'}.`);
       return false;
     }
     setOperationNotice(`Deleted worktree for ${getTaskDisplayName(tab)}.`);
@@ -789,7 +789,7 @@ function App() {
     if (!confirmed) return;
     const res = await window.electronAPI.removeWorktree(projectPath, resolvedBranch, worktreePath, true);
     if (!res.success) {
-      alert(`Failed to delete worktree: ${res.error}`);
+      setOperationNotice(`Failed to delete worktree: ${res.error || 'unknown error'}.`);
       return;
     }
     setOperationNotice(`Deleted worktree ${resolvedBranch}.`);

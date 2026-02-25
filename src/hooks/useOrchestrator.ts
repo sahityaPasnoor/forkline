@@ -1122,13 +1122,21 @@ export const useOrchestrator = () => {
     if (request.action === 'merge') {
       const res = await closeTaskById(request.taskId, 'merge');
       if (!res.success) {
-        alert(`Failed to merge worktree: ${res.error}`);
+        const tab = tabsRef.current.find((item) => item.id === request.taskId);
+        pushAttentionEvent({
+          kind: 'approval_required',
+          projectPath: tab?.basePath || '',
+          taskId: request.taskId,
+          taskName: tab?.name || request.taskId,
+          reason: `Merge approval accepted, but local merge failed: ${res.error || 'unknown error'}.`,
+          requiresAction: true
+        });
       }
     }
     void window.electronAPI.fleetRecordEvent(request.taskId, 'approval_accepted', { action: request.action });
     clearAttentionForTask(request.taskId, ['approval_required']);
     setPendingApprovals(prev => prev.filter(item => item.requestId !== request.requestId));
-  }, [pendingApprovals, closeTaskById, clearAttentionForTask]);
+  }, [pendingApprovals, closeTaskById, clearAttentionForTask, pushAttentionEvent]);
 
   const rejectApprovalRequest = useCallback((requestId: string) => {
     const request = pendingApprovals.find((item) => item.requestId === requestId);

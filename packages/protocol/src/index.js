@@ -16,6 +16,8 @@ const Routes = {
   GIT_BRANCH_LIST: '/v1/git/branches/list',
   GIT_WORKTREE_REMOVE: '/v1/git/worktree/remove',
   GIT_WORKTREE_MERGE: '/v1/git/worktree/merge',
+  GIT_DIFF: '/v1/git/diff',
+  GIT_MODIFIED_FILES: '/v1/git/modified-files',
   PTY_CREATE: '/v1/pty/create',
   PTY_ATTACH: '/v1/pty/attach',
   PTY_DETACH: '/v1/pty/detach',
