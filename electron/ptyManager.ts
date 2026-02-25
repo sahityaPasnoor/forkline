@@ -1,4 +1,4 @@
-import { ipcMain, webContents } from 'electron';
+import { ipcMain, webContents, type WebContents } from 'electron';
 
 // Shared core engine implementation.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -7,7 +7,19 @@ const { PtyService } = require('../../packages/core/src/services/pty-service');
 interface PtyLifecycleHooks {
   onSessionStarted?: (data: { taskId: string; cwd: string; createdAt: number }) => void;
   onSessionActivity?: (data: { taskId: string; at: number }) => void;
+  onSessionMode?: (data: {
+    taskId: string;
+    mode: string;
+    modeSeq: number;
+    modeConfidence?: string;
+    modeSource?: string;
+    provider?: string;
+    isBlocked: boolean;
+    blockedReason?: string;
+  }) => void;
   onSessionBlocked?: (data: { taskId: string; isBlocked: boolean; reason?: string }) => void;
+  onSessionData?: (data: { taskId: string; data: string }) => void;
+  onSessionInput?: (data: { taskId: string; data: string }) => void;
   onSessionExited?: (data: { taskId: string; exitCode: number | null; signal?: number }) => void;
   onSessionDestroyed?: (data: { taskId: string }) => void;
 }
@@ -24,6 +36,11 @@ type PtyServiceInstance = {
     outputBuffer: string;
     isBlocked: boolean;
     blockedReason?: string;
+    mode?: string;
+    modeSeq?: number;
+    modeConfidence?: string;
+    modeSource?: string;
+    provider?: string;
     running: boolean;
     exitCode: number | null;
     signal?: number;
@@ -31,12 +48,18 @@ type PtyServiceInstance = {
   detach: (taskId: string, subscriberId?: string) => void;
   write: (taskId: string, data: string) => { success: boolean; error?: string };
   resize: (taskId: string, cols: number, rows: number) => { success: boolean };
+  restart: (taskId: string, subscriberId?: string) => { success: boolean; running: boolean; restarted: boolean; error?: string };
   destroy: (taskId: string) => { success: boolean };
   listSessions: () => Array<{
     taskId: string;
     cwd: string;
     running: boolean;
     isBlocked: boolean;
+    mode?: string;
+    modeSeq?: number;
+    modeConfidence?: string;
+    modeSource?: string;
+    provider?: string;
     subscribers: number;
     createdAt: number;
     lastActivityAt: number;
@@ -52,6 +75,7 @@ export class PtyManager {
   private service: PtyServiceInstance;
   private rendererSubscribers = new Map<string, Set<number>>();
   private static TASK_ID_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
+  private static ATTACH_CHUNK_SIZE = 64_000;
 
   constructor(hooks: PtyLifecycleHooks = {}) {
     this.hooks = hooks;
@@ -78,7 +102,31 @@ export class PtyManager {
       });
     });
 
+    this.service.on('mode', ({ taskId, mode, seq, confidence, source, provider, isBlocked, blockedReason }) => {
+      this.hooks.onSessionMode?.({
+        taskId,
+        mode,
+        modeSeq: seq,
+        modeConfidence: confidence,
+        modeSource: source,
+        provider,
+        isBlocked: !!isBlocked,
+        blockedReason
+      });
+      this.broadcast(taskId, `pty:mode:${taskId}`, {
+        taskId,
+        mode,
+        modeSeq: seq,
+        modeConfidence: confidence,
+        modeSource: source,
+        provider,
+        isBlocked: !!isBlocked,
+        blockedReason
+      });
+    });
+
     this.service.on('data', ({ taskId, data }) => {
+      this.hooks.onSessionData?.({ taskId, data });
       this.broadcast(taskId, `pty:data:${taskId}`, data);
     });
 
@@ -109,16 +157,26 @@ export class PtyManager {
         event.sender.send(`pty:data:${taskId}`, `\r\n[orchestrator] ${(state as any).error}\r\n`);
         return;
       }
-      const existing = this.service.attach(taskId, String(senderId));
       this.trackSubscriber(taskId, senderId);
+      const existing = this.service.attach(taskId, String(senderId));
       if (existing?.outputBuffer) {
-        event.sender.send(`pty:data:${taskId}`, existing.outputBuffer);
+        this.sendBufferedOutput(event.sender, taskId, existing.outputBuffer);
       }
-      if (existing?.isBlocked) {
+      if (existing) {
         event.sender.send('agent:blocked', {
           taskId,
-          isBlocked: true,
-          reason: existing.blockedReason
+          isBlocked: !!existing.isBlocked,
+          reason: existing.isBlocked ? existing.blockedReason : undefined
+        });
+        event.sender.send(`pty:mode:${taskId}`, {
+          taskId,
+          mode: existing.mode || 'booting',
+          modeSeq: existing.modeSeq || 0,
+          modeConfidence: existing.modeConfidence || 'low',
+          modeSource: existing.modeSource || 'snapshot',
+          provider: existing.provider,
+          isBlocked: !!existing.isBlocked,
+          blockedReason: existing.isBlocked ? existing.blockedReason : undefined
         });
       }
       if (existing && !existing.running) {
@@ -130,7 +188,7 @@ export class PtyManager {
       }
       event.sender.send(`pty:state:${taskId}`, {
         taskId,
-        created: state.created,
+        created: !!state.created,
         running: state.running,
         restarted: !!state.restarted
       });
@@ -147,7 +205,9 @@ export class PtyManager {
       const result = this.service.write(taskId, data);
       if (!result.success) {
         event.sender.send(`pty:data:${taskId}`, '\r\n[orchestrator] PTY is not running for this tab.\r\n');
+        return;
       }
+      this.hooks.onSessionInput?.({ taskId, data });
     });
 
     ipcMain.on('pty:resize', (event, { taskId, cols, rows }) => {
@@ -176,6 +236,55 @@ export class PtyManager {
 
     ipcMain.handle('pty:listSessions', () => {
       return { success: true, sessions: this.service.listSessions() };
+    });
+
+    ipcMain.handle('pty:restart', (event, { taskId }) => {
+      if (!PtyManager.TASK_ID_PATTERN.test(String(taskId || ''))) {
+        return { success: false, running: false, restarted: false, error: 'Invalid task id.' };
+      }
+      const senderId = event.sender.id;
+      this.trackSubscriber(taskId, senderId);
+      const restarted = this.service.restart(taskId, String(senderId));
+      if (!restarted.success) {
+        return restarted;
+      }
+
+      const existing = this.service.attach(taskId, String(senderId));
+      if (existing?.outputBuffer) {
+        this.sendBufferedOutput(event.sender, taskId, existing.outputBuffer);
+      }
+      if (existing) {
+        event.sender.send('agent:blocked', {
+          taskId,
+          isBlocked: !!existing.isBlocked,
+          reason: existing.isBlocked ? existing.blockedReason : undefined
+        });
+        event.sender.send(`pty:mode:${taskId}`, {
+          taskId,
+          mode: existing.mode || 'booting',
+          modeSeq: existing.modeSeq || 0,
+          modeConfidence: existing.modeConfidence || 'low',
+          modeSource: existing.modeSource || 'snapshot',
+          provider: existing.provider,
+          isBlocked: !!existing.isBlocked,
+          blockedReason: existing.isBlocked ? existing.blockedReason : undefined
+        });
+        if (!existing.running) {
+          event.sender.send(`pty:exit:${taskId}`, {
+            taskId,
+            exitCode: existing.exitCode,
+            signal: existing.signal
+          });
+        }
+      }
+      event.sender.send(`pty:state:${taskId}`, {
+        taskId,
+        created: false,
+        running: !!existing?.running,
+        restarted: true
+      });
+
+      return { success: true, running: !!existing?.running, restarted: true };
     });
 
     ipcMain.on('pty:destroyAllForSender', (event) => {
@@ -214,6 +323,17 @@ export class PtyManager {
         continue;
       }
       subscriber.send(channel, payload);
+    }
+  }
+
+  private sendBufferedOutput(sender: WebContents, taskId: string, outputBuffer: string) {
+    if (!outputBuffer) return;
+    if (outputBuffer.length <= PtyManager.ATTACH_CHUNK_SIZE) {
+      sender.send(`pty:data:${taskId}`, outputBuffer);
+      return;
+    }
+    for (let index = 0; index < outputBuffer.length; index += PtyManager.ATTACH_CHUNK_SIZE) {
+      sender.send(`pty:data:${taskId}`, outputBuffer.slice(index, index + PtyManager.ATTACH_CHUNK_SIZE));
     }
   }
 }

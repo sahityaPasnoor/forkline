@@ -4,7 +4,15 @@ const path = require('node:path');
 const MAX_TEXT_FILE_BYTES = 256_000;
 const MAX_LIVING_SPEC_FILES = 32;
 const MAX_LIVING_SPEC_FILE_BYTES = 256_000;
+const AGENTS_PRIMARY_FILES = [
+  'AGENTS.md',
+  'agents.md',
+  '.github/AGENTS.md',
+  '.github/agents.md'
+];
 const AGENTIC_ROOT_CANDIDATE_FILES = [
+  'SPEC.md',
+  'SPECIFICATION.md',
   'AGENTS.md',
   'CLAUDE.md',
   'GEMINI.md',
@@ -57,6 +65,15 @@ const normalizeRelativeRepoPath = (value) => {
   if (segments.length === 0) return '';
   if (segments.some((segment) => segment === '.' || segment === '..')) return '';
   return segments.join('/');
+};
+
+const isAgentsInstructionPath = (relativePath) => path.basename(relativePath).toLowerCase() === 'agents.md';
+
+const rankAgentsInstructionPath = (relativePath) => {
+  const normalized = relativePath.toLowerCase();
+  if (normalized === 'agents.md') return 0;
+  if (normalized === '.github/agents.md') return 1;
+  return 2;
 };
 
 const isLikelyTextSpecPath = (relativePath) => {
@@ -113,6 +130,37 @@ const listAgenticDirectoryFiles = (basePath, relativeDir, maxDepth = 3) => {
 };
 
 const collectAgenticSpecCandidates = (basePath) => {
+  const primaryMatches = new Map();
+  for (const relativePath of AGENTS_PRIMARY_FILES) {
+    const normalized = normalizeRelativeRepoPath(relativePath);
+    if (!normalized) continue;
+    const absolute = path.join(basePath, normalized);
+    if (!isPathInside(basePath, absolute)) continue;
+    try {
+      const stat = fs.statSync(absolute);
+      if (!stat.isFile()) continue;
+      const dedupeKey = normalized.toLowerCase();
+      if (!primaryMatches.has(dedupeKey)) {
+        primaryMatches.set(dedupeKey, normalized);
+      }
+    } catch {
+      // ignore missing candidates
+    }
+  }
+
+  if (primaryMatches.size > 0) {
+    return Array.from(primaryMatches.values())
+      .sort((a, b) => {
+        const rankDiff = rankAgentsInstructionPath(a) - rankAgentsInstructionPath(b);
+        if (rankDiff !== 0) return rankDiff;
+        return a.localeCompare(b);
+      })
+      .map((relativePath) => ({
+        path: relativePath,
+        kind: 'agents'
+      }));
+  }
+
   const matches = new Set();
 
   for (const relativePath of AGENTIC_ROOT_CANDIDATE_FILES) {
@@ -138,7 +186,9 @@ const collectAgenticSpecCandidates = (basePath) => {
     .sort((a, b) => a.localeCompare(b))
     .map((relativePath) => ({
       path: relativePath,
-      kind: relativePath.includes('/rules') || relativePath.endsWith('rules') ? 'rules' : 'spec'
+      kind: isAgentsInstructionPath(relativePath)
+        ? 'agents'
+        : (relativePath.includes('/rules') || relativePath.endsWith('rules') ? 'rules' : 'spec')
     }));
 };
 
@@ -162,8 +212,18 @@ const resolveLivingSpecDocument = (basePath, preference) => {
   const candidateSet = new Set(candidates.map((candidate) => candidate.path));
   const sourcePaths = [];
   let mode = 'single';
+  const preferredAgentsCandidate = candidates
+    .filter((candidate) => isAgentsInstructionPath(candidate.path))
+    .sort((a, b) => {
+      const rankDiff = rankAgentsInstructionPath(a.path) - rankAgentsInstructionPath(b.path);
+      if (rankDiff !== 0) return rankDiff;
+      return a.path.localeCompare(b.path);
+    })[0];
 
-  if (preference?.mode === 'single' && preference.selectedPath && candidateSet.has(preference.selectedPath)) {
+  if (preferredAgentsCandidate) {
+    sourcePaths.push(preferredAgentsCandidate.path);
+    mode = 'single';
+  } else if (preference?.mode === 'single' && preference.selectedPath && candidateSet.has(preference.selectedPath)) {
     sourcePaths.push(preference.selectedPath);
     mode = 'single';
   } else if (preference?.mode === 'consolidated') {
@@ -205,12 +265,39 @@ const resolveLivingSpecDocument = (basePath, preference) => {
   return {
     content: clampUtf8(doc, MAX_TEXT_FILE_BYTES),
     sources: sourcePaths,
-    mode
+    mode,
+    resolvedPath: mode === 'single' && sourcePaths.length === 1 ? sourcePaths[0] : null
   };
+};
+
+const LANGUAGE_HINTS = [
+  { language: 'typescript', include: ['typescript', 'ts/tsx', 'tsx'], requiredExts: ['.ts', '.tsx'], forbiddenExts: ['.py'] },
+  { language: 'python', include: ['python', 'pyproject', 'pep8'], requiredExts: ['.py'], forbiddenExts: ['.ts', '.tsx'] },
+  { language: 'go', include: ['golang', ' go '], requiredExts: ['.go'], forbiddenExts: [] },
+  { language: 'rust', include: ['rust'], requiredExts: ['.rs'], forbiddenExts: [] }
+];
+
+const resolveLivingSpecSummary = (basePath, preference) => {
+  const resolved = resolveLivingSpecDocument(basePath, preference);
+  if (!resolved || !resolved.content) return null;
+  const lower = resolved.content.toLowerCase();
+
+  for (const hint of LANGUAGE_HINTS) {
+    if (hint.include.some((token) => lower.includes(token))) {
+      return {
+        preferredLanguage: hint.language,
+        requiredExts: hint.requiredExts.slice(),
+        forbiddenExts: hint.forbiddenExts.slice()
+      };
+    }
+  }
+
+  return null;
 };
 
 module.exports = {
   collectAgenticSpecCandidates,
   sanitizeLivingSpecPreference,
-  resolveLivingSpecDocument
+  resolveLivingSpecDocument,
+  resolveLivingSpecSummary
 };

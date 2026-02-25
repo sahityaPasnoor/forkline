@@ -1,6 +1,7 @@
 const Events = {
   TASK_UPDATED: 'task.updated',
   PTY_DATA: 'pty.data',
+  PTY_MODE: 'pty.mode',
   APPROVAL_REQUIRED: 'approval.required',
   APPROVAL_RESOLVED: 'approval.resolved'
 };
@@ -25,10 +26,26 @@ const Routes = {
 };
 
 const { detectAgentCapabilities, resolveQuickActionPlan } = require('./quick-actions');
+const {
+  PTY_MODES,
+  PTY_MODE_CONFIDENCE,
+  SUPPORTED_PROVIDERS,
+  detectProviderFromCommand,
+  buildAgentWrapperCommand,
+  parseForklineMarkers,
+  PtySessionStateMachine
+} = require('./pty-state-machine');
 
 module.exports = {
   Events,
   Routes,
   detectAgentCapabilities,
-  resolveQuickActionPlan
+  resolveQuickActionPlan,
+  PTY_MODES,
+  PTY_MODE_CONFIDENCE,
+  SUPPORTED_PROVIDERS,
+  detectProviderFromCommand,
+  buildAgentWrapperCommand,
+  parseForklineMarkers,
+  PtySessionStateMachine
 };

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, session } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, session, clipboard, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { execFile } from 'child_process';
@@ -10,12 +10,14 @@ import { FleetStore, type FleetListTasksOptions, type FleetTaskPayload } from '.
 const {
   collectAgenticSpecCandidates,
   sanitizeLivingSpecPreference,
-  resolveLivingSpecDocument
+  resolveLivingSpecDocument,
+  resolveLivingSpecSummary
 } = require('../../packages/core/src/services/living-spec-service');
 
 const execFileAsync = util.promisify(execFile);
 const devServerUrl = process.env.VITE_DEV_SERVER_URL;
 const isDev = !!devServerUrl;
+const keepBackgroundServicesAlive = String(process.env.FORKLINE_KEEP_BACKGROUND_SERVICES || '1').toLowerCase() !== '0';
 let mainWindow: BrowserWindow | null = null;
 let agentServer: AgentControlServer | null = null;
 let fleetStore: FleetStore | null = null;
@@ -27,6 +29,9 @@ const MAX_TEXT_FILE_BYTES = 256_000;
 const MAX_IMAGE_FILE_BYTES = 10_000_000;
 const MAX_WORKSPACE_JSON_BYTES = 512_000;
 const MAX_RUNTIME_SESSION_BYTES = 8_000_000;
+const MAX_CLIPBOARD_TEXT_BYTES = 1_000_000;
+const MAX_HANDOVER_PACKET_BYTES = 256_000;
+const MAX_EXTERNAL_URL_BYTES = 2048;
 const WORKTREE_BASENAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
 const FILENAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
 type WorkspaceLivingSpecPreference = { mode: 'single' | 'consolidated'; selectedPath?: string };
@@ -93,6 +98,24 @@ const sanitizePathString = (value: unknown) => {
   return path.resolve(candidate);
 };
 
+const normalizeHandoverProvider = (value: unknown) => {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!raw) return 'agent';
+  const firstToken = raw.split(/\s+/)[0] || 'agent';
+  const normalized = firstToken.replace(/[^a-z0-9._-]/g, '');
+  return normalized.slice(0, 48) || 'agent';
+};
+
+const sanitizeHandoverPacket = (value: unknown) => {
+  const safePacket = (value && typeof value === 'object') ? value : {};
+  const serialized = JSON.stringify(safePacket);
+  if (!serialized) return {};
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_HANDOVER_PACKET_BYTES) {
+    throw new Error('Handover packet too large.');
+  }
+  return JSON.parse(serialized);
+};
+
 const sanitizeWorkspaceStoreData = (input: unknown) => {
   const source = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
   const rawPermissions = (source.projectPermissions && typeof source.projectPermissions === 'object')
@@ -126,7 +149,6 @@ const sanitizeWorkspaceStoreData = (input: unknown) => {
     basePath: sanitizePathString(source.basePath),
     context: clampUtf8(source.context, MAX_TEXT_FILE_BYTES),
     defaultCommand: clampString(source.defaultCommand, 128),
-    mcpEnabled: !!source.mcpEnabled,
     packageStoreStrategy: source.packageStoreStrategy === 'pnpm_global' || source.packageStoreStrategy === 'polyglot_global'
       ? source.packageStoreStrategy
       : 'off',
@@ -243,13 +265,17 @@ function createWindow() {
   });
 
   if (!agentServer) {
-    agentServer = new AgentControlServer(mainWindow);
+    agentServer = new AgentControlServer({
+      mainWindow,
+      persistencePath: path.join(app.getPath('userData'), 'agent-approvals.json')
+    });
   } else {
     agentServer.setMainWindow(mainWindow);
   }
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    agentServer?.setMainWindow(null);
   });
 
   if (isDev) {
@@ -280,6 +306,15 @@ app.whenReady().then(async () => {
     onSessionBlocked: ({ taskId, isBlocked, reason }) => {
       fleetStore?.onPtySessionBlocked(taskId, isBlocked, reason);
     },
+    onSessionMode: ({ taskId, mode, modeSeq, modeConfidence, modeSource, provider, isBlocked, blockedReason }) => {
+      fleetStore?.onPtySessionMode(taskId, mode, modeSeq, modeConfidence, modeSource, provider, isBlocked, blockedReason);
+    },
+    onSessionData: ({ taskId, data }) => {
+      fleetStore?.onPtySessionData(taskId, data);
+    },
+    onSessionInput: ({ taskId, data }) => {
+      fleetStore?.onPtySessionInput(taskId, data);
+    },
     onSessionExited: ({ taskId, exitCode, signal }) => {
       fleetStore?.onPtySessionExited(taskId, exitCode, signal);
     },
@@ -303,6 +338,42 @@ app.whenReady().then(async () => {
     return process.env.PWD || process.cwd();
   });
 
+  ipcMain.handle('clipboard:readText', () => {
+    return clipboard.readText();
+  });
+
+  ipcMain.handle('clipboard:writeText', (_event, payload: { text?: unknown } = {}) => {
+    const text = typeof payload.text === 'string' ? payload.text : '';
+    if (Buffer.byteLength(text, 'utf8') > MAX_CLIPBOARD_TEXT_BYTES) {
+      return { success: false, error: 'Clipboard payload too large.' };
+    }
+    clipboard.writeText(text);
+    return { success: true };
+  });
+
+  ipcMain.handle('app:openExternalUrl', async (_event, payload: { url?: unknown } = {}) => {
+    const candidate = typeof payload.url === 'string' ? payload.url.trim() : '';
+    if (!candidate) return { success: false, error: 'URL is required.' };
+    if (Buffer.byteLength(candidate, 'utf8') > MAX_EXTERNAL_URL_BYTES) {
+      return { success: false, error: 'URL is too long.' };
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      return { success: false, error: 'Invalid URL.' };
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return { success: false, error: 'Only http(s) URLs are allowed.' };
+    }
+    try {
+      await shell.openExternal(parsed.toString());
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message || 'Failed to open URL.' };
+    }
+  });
+
   ipcMain.handle('app:getControlBaseUrl', () => {
     if (agentServer) {
       return agentServer.getBaseUrl();
@@ -312,6 +383,11 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('app:getControlAuthToken', () => {
     return agentServer?.getAuthToken() || '';
+  });
+
+  ipcMain.handle('app:listPendingAgentRequests', () => {
+    if (!agentServer) return [];
+    return agentServer.listPendingRequests();
   });
 
   ipcMain.handle('app:detectAgents', async () => {
@@ -374,6 +450,22 @@ app.whenReady().then(async () => {
     }
   });
 
+  ipcMain.handle('app:getLivingSpecSummary', async (event, { basePath, livingSpecPreference }) => {
+    try {
+      const safeBasePath = resolveSafeProjectPath(basePath);
+      if (!safeBasePath) {
+        return { success: false, error: 'Invalid base path' };
+      }
+      const summary = resolveLivingSpecSummary(
+        safeBasePath,
+        sanitizeLivingSpecPreference(livingSpecPreference)
+      );
+      return { success: true, summary: summary || undefined };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  });
+
   ipcMain.handle('app:saveImage', async (event, { worktreePath, imageBase64, filename }) => {
     try {
       const safeWorktreePath = resolveSafeWorktreePath(worktreePath);
@@ -404,13 +496,39 @@ app.whenReady().then(async () => {
     }
   });
 
+  ipcMain.handle('app:writeHandoverArtifact', async (_event, { worktreePath, packet, command }) => {
+    try {
+      const safeWorktreePath = resolveSafeWorktreePath(worktreePath);
+      if (!safeWorktreePath) {
+        return { success: false, error: 'Invalid worktree path' };
+      }
+      const safePacket = sanitizeHandoverPacket(packet);
+      const provider = normalizeHandoverProvider(command);
+      const cacheDir = path.join(safeWorktreePath, '.agent_cache');
+      const handoverDir = path.join(cacheDir, 'handover');
+      fs.mkdirSync(handoverDir, { recursive: true });
+      fs.writeFileSync(path.join(cacheDir, '.gitignore'), '*\n');
+
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const fileName = `${stamp}-${provider}.json`;
+      const relativePath = path.join('.agent_cache', 'handover', fileName).replace(/\\/g, '/');
+      const latestRelativePath = path.join('.agent_cache', 'handover', 'latest.json').replace(/\\/g, '/');
+      safeWriteJson(path.join(safeWorktreePath, relativePath), safePacket, MAX_HANDOVER_PACKET_BYTES);
+      safeWriteJson(path.join(safeWorktreePath, latestRelativePath), safePacket, MAX_HANDOVER_PACKET_BYTES);
+
+      return { success: true, path: relativePath, latestPath: latestRelativePath };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Failed to write handover artifact.' };
+    }
+  });
+
   ipcMain.handle('app:prepareAgentWorkspace', async (event, {
     worktreePath,
     projectPath,
     context,
-    mcpServers,
     apiDoc,
-    livingSpecPreference
+    livingSpecPreference,
+    livingSpecOverridePath
   }) => {
     try {
       const safeWorktreePath = resolveSafeWorktreePath(worktreePath);
@@ -440,16 +558,28 @@ app.whenReady().then(async () => {
         fs.writeFileSync(path.join(cacheDir, 'agent_api.md'), safeApiDoc, 'utf8');
       }
 
-      const resolvedLivingSpec = resolveLivingSpecDocument(
-        safeProjectPath,
-        sanitizeLivingSpecPreference(livingSpecPreference)
-      );
+      const normalizedOverridePath = typeof livingSpecOverridePath === 'string'
+        ? livingSpecOverridePath.trim().replace(/\\/g, '/').replace(/^\.\/+/, '')
+        : '';
+      const overridePreference = normalizedOverridePath
+        ? { mode: 'single' as const, selectedPath: normalizedOverridePath }
+        : sanitizeLivingSpecPreference(livingSpecPreference);
+      const resolvedLivingSpec = resolveLivingSpecDocument(safeProjectPath, overridePreference);
       const forklineSpecPath = path.join(cacheDir, 'FORKLINE_SPEC.md');
-      if (resolvedLivingSpec?.content) {
+      const directSpecSourcePath = typeof resolvedLivingSpec?.resolvedPath === 'string'
+        ? resolvedLivingSpec.resolvedPath.trim()
+        : '';
+      const hasDirectSpecSource = !!directSpecSourcePath;
+      if (hasDirectSpecSource) {
+        if (fs.existsSync(forklineSpecPath)) {
+          fs.rmSync(forklineSpecPath, { force: true });
+        }
+      } else if (resolvedLivingSpec?.content) {
         fs.writeFileSync(forklineSpecPath, resolvedLivingSpec.content, 'utf8');
       } else if (fs.existsSync(forklineSpecPath)) {
         fs.rmSync(forklineSpecPath, { force: true });
       }
+      const exposedSpecPath = hasDirectSpecSource ? directSpecSourcePath : '.agent_cache/FORKLINE_SPEC.md';
 
       const memoryPath = path.join(cacheDir, 'agent_memory.md');
       const safeContext = clampUtf8(context, MAX_TEXT_FILE_BYTES);
@@ -461,7 +591,7 @@ app.whenReady().then(async () => {
         memorySections.push(
           [
             'Living Spec:',
-            `- canonical path: .agent_cache/FORKLINE_SPEC.md`,
+            `- path: ${exposedSpecPath}`,
             `- mode: ${resolvedLivingSpec.mode}`,
             `- sources: ${resolvedLivingSpec.sources.join(', ')}`
           ].join('\n')
@@ -471,19 +601,6 @@ app.whenReady().then(async () => {
         fs.writeFileSync(memoryPath, `${memorySections.join('\n\n')}\n`, 'utf8');
       } else if (fs.existsSync(memoryPath)) {
         fs.rmSync(memoryPath, { force: true });
-      }
-
-      const mcpPath = path.join(cacheDir, 'mcp.json');
-      const safeMcp = clampUtf8(mcpServers, MAX_TEXT_FILE_BYTES);
-      if (safeMcp) {
-        try {
-          const parsed = JSON.parse(safeMcp);
-          fs.writeFileSync(mcpPath, JSON.stringify(parsed, null, 2), 'utf8');
-        } catch {
-          return { success: false, error: 'Invalid MCP JSON' };
-        }
-      } else if (fs.existsSync(mcpPath)) {
-        fs.rmSync(mcpPath, { force: true });
       }
 
       return { success: true };
@@ -619,7 +736,10 @@ app.whenReady().then(async () => {
 });
 
 app.on('second-instance', () => {
-  if (!mainWindow) return;
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
   if (mainWindow.isMinimized()) {
     mainWindow.restore();
   }
@@ -627,7 +747,7 @@ app.on('second-instance', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  if (process.platform !== 'darwin' && !keepBackgroundServicesAlive) app.quit();
 });
 
 app.on('before-quit', () => {

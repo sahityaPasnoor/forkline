@@ -1,0 +1,22 @@
+{
+  "name": "gemini_tui_not_blocked",
+  "providerHint": "gemini",
+  "events": [
+    { "type": "start" },
+    {
+      "type": "output",
+      "data": "\u001b[?1049h\nAuthenticated with gemini-api-key /auth\n",
+      "expect": { "mode": "tui", "isBlocked": false }
+    },
+    {
+      "type": "output",
+      "data": "Type your message or @path/to/file\n",
+      "expect": { "mode": "tui", "isBlocked": false }
+    }
+  ],
+  "expectFinal": {
+    "mode": "tui",
+    "isBlocked": false,
+    "provider": "gemini"
+  }
+}

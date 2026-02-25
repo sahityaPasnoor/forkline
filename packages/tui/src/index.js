@@ -212,6 +212,7 @@ const runTui = async () => {
   const tuiAgentCommand = getTuiAgentCommand();
   let followedTaskId = null;
   const blockedByTask = new Map();
+  const modeByTask = new Map();
 
   process.stdout.write(`Connected target: ${coreBaseUrl}\n`);
   printHelp();
@@ -242,6 +243,23 @@ const runTui = async () => {
         process.stdout.write(`\n[blocked:${taskId}] cleared\n`);
       }
       rl.prompt();
+      return;
+    }
+
+    if (event.type === 'pty.mode') {
+      const taskId = event.payload?.taskId;
+      if (!taskId) return;
+      const mode = String(event.payload?.mode || 'booting');
+      const isBlocked = !!event.payload?.isBlocked;
+      const reason = event.payload?.blockedReason || '';
+      modeByTask.set(taskId, mode);
+      blockedByTask.set(taskId, isBlocked);
+      if (taskId === followedTaskId) {
+        process.stdout.write(`\n[mode:${taskId}] ${mode}`);
+        if (isBlocked) process.stdout.write(` (${reason || 'awaiting confirmation'})`);
+        process.stdout.write('\n');
+        rl.prompt();
+      }
       return;
     }
 
@@ -288,6 +306,11 @@ const runTui = async () => {
 
       if (cmd === 'sessions') {
         const data = await httpRequestJson('GET', `${coreBaseUrl}/v1/pty/sessions`, undefined, coreAuthToken);
+        for (const session of Array.isArray(data.sessions) ? data.sessions : []) {
+          if (!session?.taskId) continue;
+          modeByTask.set(session.taskId, session.mode || 'booting');
+          blockedByTask.set(session.taskId, !!session.isBlocked);
+        }
         process.stdout.write(`${JSON.stringify(data.sessions || [], null, 2)}\n`);
         rl.prompt();
         return;

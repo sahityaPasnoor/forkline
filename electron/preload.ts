@@ -3,21 +3,39 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('electronAPI', {
   openDirectoryDialog: () => ipcRenderer.invoke('dialog:openDirectory'),
   getDefaultPath: () => ipcRenderer.invoke('app:getDefaultPath'),
+  readClipboardText: () => ipcRenderer.invoke('clipboard:readText'),
+  writeClipboardText: (text: string) => ipcRenderer.invoke('clipboard:writeText', { text }),
+  openExternalUrl: (url: string) => ipcRenderer.invoke('app:openExternalUrl', { url }),
   getControlBaseUrl: () => ipcRenderer.invoke('app:getControlBaseUrl'),
   getControlAuthToken: () => ipcRenderer.invoke('app:getControlAuthToken'),
+  listPendingAgentRequests: () => ipcRenderer.invoke('app:listPendingAgentRequests'),
   validateSource: (sourcePath: string) => ipcRenderer.invoke('git:validateSource', { sourcePath }),
   detectAgents: () => ipcRenderer.invoke('app:detectAgents'),
   prepareAgentWorkspace: (
     worktreePath: string,
     projectPath: string,
     context: string,
-    mcpServers: string,
     apiDoc: string,
-    livingSpecPreference?: { mode: 'single' | 'consolidated'; selectedPath?: string }
+    livingSpecPreference?: { mode: 'single' | 'consolidated'; selectedPath?: string },
+    livingSpecOverridePath?: string
   ) =>
-    ipcRenderer.invoke('app:prepareAgentWorkspace', { worktreePath, projectPath, context, mcpServers, apiDoc, livingSpecPreference }),
+    ipcRenderer.invoke('app:prepareAgentWorkspace', {
+      worktreePath,
+      projectPath,
+      context,
+      apiDoc,
+      livingSpecPreference,
+      livingSpecOverridePath
+    }),
   detectLivingSpecCandidates: (basePath: string) =>
     ipcRenderer.invoke('app:detectLivingSpecCandidates', { basePath }),
+  getLivingSpecSummary: (
+    basePath: string,
+    livingSpecPreference?: { mode: 'single' | 'consolidated'; selectedPath?: string }
+  ) =>
+    ipcRenderer.invoke('app:getLivingSpecSummary', { basePath, livingSpecPreference }),
+  writeHandoverArtifact: (worktreePath: string, packet: any, command: string) =>
+    ipcRenderer.invoke('app:writeHandoverArtifact', { worktreePath, packet, command }),
   saveImage: (worktreePath: string, imageBase64: string, filename: string) => ipcRenderer.invoke('app:saveImage', { worktreePath, imageBase64, filename }),
   createWorktree: (
     basePath: string,
@@ -35,6 +53,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listWorktrees: (basePath: string) => ipcRenderer.invoke('git:listWorktrees', { basePath }),
   getWorkspaceInfo: (basePath: string) => ipcRenderer.invoke('git:getWorkspaceInfo', { basePath }),
   listBranches: (basePath: string) => ipcRenderer.invoke('git:listBranches', { basePath }),
+  getRepositoryWebUrl: (basePath: string) => ipcRenderer.invoke('git:getRepositoryWebUrl', { basePath }),
   getDiff: (worktreePath: string, options?: { syntaxAware?: boolean }) => ipcRenderer.invoke('git:getDiff', { worktreePath, options }),
   getModifiedFiles: (worktreePath: string) => ipcRenderer.invoke('git:getModifiedFiles', { worktreePath }),
   removeWorktree: (basePath: string, taskName: string, worktreePath: string, force: boolean) => ipcRenderer.invoke('git:removeWorktree', { basePath, taskName, worktreePath, force }),
@@ -55,6 +74,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createPty: (taskId: string, cwd?: string, customEnv?: Record<string, string>) => ipcRenderer.send('pty:create', { taskId, cwd, customEnv }),
   writePty: (taskId: string, data: string) => ipcRenderer.send('pty:write', { taskId, data }),
   resizePty: (taskId: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', { taskId, cols, rows }),
+  restartPty: (taskId: string) => ipcRenderer.invoke('pty:restart', { taskId }),
   detachPty: (taskId: string) => ipcRenderer.send('pty:detach', { taskId }),
   destroyPty: (taskId: string) => ipcRenderer.send('pty:destroy', { taskId }),
   listPtySessions: () => ipcRenderer.invoke('pty:listSessions'),
@@ -76,6 +96,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onPtyExit: (taskId: string, callback: (data: {taskId: string, exitCode: number | null, signal?: number}) => void) => {
     const channel = `pty:exit:${taskId}`;
     const listener = (_: Electron.IpcRendererEvent, data: {taskId: string, exitCode: number | null, signal?: number}) => callback(data);
+    ipcRenderer.on(channel, listener);
+    return () => ipcRenderer.removeListener(channel, listener);
+  },
+  onPtyMode: (
+    taskId: string,
+    callback: (data: {
+      taskId: string;
+      mode: string;
+      modeSeq: number;
+      modeConfidence?: string;
+      modeSource?: string;
+      provider?: string;
+      isBlocked: boolean;
+      blockedReason?: string;
+    }) => void
+  ) => {
+    const channel = `pty:mode:${taskId}`;
+    const listener = (
+      _: Electron.IpcRendererEvent,
+      data: {
+        taskId: string;
+        mode: string;
+        modeSeq: number;
+        modeConfidence?: string;
+        modeSource?: string;
+        provider?: string;
+        isBlocked: boolean;
+        blockedReason?: string;
+      }
+    ) => callback(data);
     ipcRenderer.on(channel, listener);
     return () => ipcRenderer.removeListener(channel, listener);
   },

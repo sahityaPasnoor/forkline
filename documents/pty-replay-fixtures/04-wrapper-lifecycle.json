@@ -1,0 +1,23 @@
+{
+  "name": "wrapper_start_and_exit",
+  "providerHint": "codex",
+  "events": [
+    { "type": "start" },
+    {
+      "type": "output",
+      "data": "\u001b]1337;ForklineEvent=type=agent_started;provider=codex\u0007",
+      "expect": { "mode": "agent", "provider": "codex", "isBlocked": false }
+    },
+    {
+      "type": "output",
+      "data": "\u001b]1337;ForklineEvent=type=agent_exited;provider=codex;code=0\u0007",
+      "expect": { "mode": "shell", "isBlocked": false, "provider": "codex" }
+    }
+  ],
+  "expectFinal": {
+    "mode": "shell",
+    "isBlocked": false,
+    "provider": "codex",
+    "exitCode": 0
+  }
+}

@@ -93,6 +93,7 @@ class CoreDaemon {
     this.ptyService.on('state', (payload) => emit('pty.state', payload));
     this.ptyService.on('activity', (payload) => emit('pty.activity', payload));
     this.ptyService.on('data', (payload) => emit('pty.data', payload));
+    this.ptyService.on('mode', (payload) => emit('pty.mode', payload));
     this.ptyService.on('blocked', (payload) => emit('pty.blocked', payload));
     this.ptyService.on('exit', (payload) => emit('pty.exit', payload));
     this.ptyService.on('destroyed', (payload) => emit('pty.destroyed', payload));

@@ -22,6 +22,7 @@ type GitServiceInstance = {
   listWorktrees: (basePath: string) => Promise<Record<string, unknown>>;
   getWorkspaceInfo: (basePath: string) => Promise<Record<string, unknown>>;
   listBranches: (basePath: string) => Promise<Record<string, unknown>>;
+  getRepositoryWebUrl: (basePath: string) => Promise<Record<string, unknown>>;
   getDiff: (worktreePath: string, options?: { syntaxAware?: boolean }) => Promise<Record<string, unknown>>;
   getModifiedFiles: (worktreePath: string) => Promise<Record<string, unknown>>;
   removeWorktree: (basePath: string, taskName: string, worktreePath: string, force: boolean) => Promise<Record<string, unknown>>;
@@ -71,6 +72,14 @@ export class GitManager {
         return await this.gitService.listBranches(basePath);
       } catch (error: any) {
         return { success: false, error: error?.message || String(error), branches: [] };
+      }
+    });
+
+    ipcMain.handle('git:getRepositoryWebUrl', async (_event, { basePath }) => {
+      try {
+        return await this.gitService.getRepositoryWebUrl(basePath);
+      } catch (error: any) {
+        return { success: false, error: error?.message || String(error) };
       }
     });
 

@@ -1,0 +1,22 @@
+{
+  "name": "provider_marker_lifecycle_gemini",
+  "events": [
+    { "type": "start" },
+    {
+      "type": "output",
+      "data": "\u001b]1337;ForklineEvent=type=agent_started;provider=gemini\u0007",
+      "expect": { "mode": "agent", "provider": "gemini", "isBlocked": false }
+    },
+    {
+      "type": "output",
+      "data": "\u001b]1337;ForklineEvent=type=agent_exited;provider=gemini;code=0\u0007",
+      "expect": { "mode": "shell", "provider": "gemini", "exitCode": 0 }
+    }
+  ],
+  "expectFinal": {
+    "mode": "shell",
+    "provider": "gemini",
+    "isBlocked": false,
+    "exitCode": 0
+  }
+}
