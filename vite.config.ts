@@ -8,7 +8,13 @@ export default defineConfig({
   plugins: [react()],
   base: './', // crucial for electron
   server: {
+    host: '127.0.0.1',
     port: Number.isFinite(devPort) ? devPort : 5555,
-    strictPort: true
+    strictPort: true,
+    cors: false
+  },
+  preview: {
+    host: '127.0.0.1',
+    cors: false
   }
 })

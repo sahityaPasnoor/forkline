@@ -45,7 +45,7 @@ jobs:
         run: npm ci
 
       - name: Build docs
-        run: npx -y vitepress@1.6.4 build docs
+        run: npm run docs:build
 
       - name: Setup Pages
         if: github.event_name != 'pull_request'

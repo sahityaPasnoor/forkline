@@ -1,0 +1,18 @@
+{
+  "name": "device_attributes_response_no_block",
+  "providerHint": "gemini",
+  "events": [
+    { "type": "start" },
+    {
+      "type": "output",
+      "data": "\u001b[?1;2c",
+      "expect": {
+        "isBlocked": false
+      }
+    }
+  ],
+  "expectFinal": {
+    "isBlocked": false,
+    "provider": "gemini"
+  }
+}

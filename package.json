@@ -3,10 +3,11 @@
   "productName": "Forkline",
   "version": "1.0.0",
   "description": "Forkline is a local-first desktop IDE for orchestrating multiple CLI coding agents across isolated git worktrees.",
+  "author": "Sahitya Pasnoor",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sahityaPasnoor/forkline.git"
+    "url": "git+https://github.com/sahityaPasnoor/forkline.git"
   },
   "bugs": {
     "url": "https://github.com/sahityaPasnoor/forkline/issues"
@@ -18,11 +19,11 @@
   "main": "dist/electron/main.js",
   "bin": {
     "forkline": "bin/forkline.js",
-    "forkline-core": "packages/core/bin/forkline-core.js",
-    "forkline-tui": "packages/tui/bin/forkline-tui.js"
+    "forkline-core": "packages/core/bin/forkline-core.js"
   },
   "files": [
     "dist/**/*",
+    "config/**/*",
     "bin/**/*",
     "packages/**/*",
     "LICENSE",
@@ -34,18 +35,27 @@
     "typecheck:web": "tsc -p tsconfig.json --noEmit",
     "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit",
     "typecheck": "npm run typecheck:web && npm run typecheck:electron",
+    "security:audit": "npm audit",
+    "security:audit:prod": "npm audit --omit=dev",
+    "security:smoke": "node scripts/security-smoke.js",
+    "test:core": "node --test \"packages/core/test/**/*.test.js\" \"packages/protocol/test/**/*.test.js\"",
+    "audit:css": "node scripts/css-hardcode-audit.js",
+    "test:pty-replay": "node scripts/pty-replay-harness.js",
+    "preflight:release": "npm run security:audit && npm run security:smoke && npm run typecheck && npm run build && node scripts/release-preflight.js",
     "dev": "node scripts/run-dev.js",
     "dev:internal": "concurrently -k \"vite\" \"npm:dev:electron:watch\" \"npm:dev:electron:run\"",
     "dev:electron:watch": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
     "dev:electron:run": "node scripts/run-electron-dev.js",
     "core:start": "node packages/core/bin/forkline-core.js",
-    "tui:start": "node packages/tui/bin/forkline-tui.js",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
     "gui:start": "npm run dev",
     "build": "vite build && npm run build:electron",
     "start": "npm run build && electron .",
-    "pack": "npx -y electron-builder@24.13.3 --dir --publish never",
-    "dist:local": "npm run build && npx -y electron-builder@24.13.3 --publish never",
-    "release": "npm run build && npx -y electron-builder@24.13.3 --publish always",
+    "pack": "node scripts/run-electron-builder.js --dir --publish never",
+    "dist:local": "npm run build && node scripts/run-electron-builder.js --publish never",
+    "release": "npm run build && node scripts/run-electron-builder.js --publish always",
     "prepack": "npm run build"
   },
   "engines": {
@@ -62,19 +72,19 @@
     "sql.js": "^1.14.0"
   },
   "devDependencies": {
-    "@electron/rebuild": "^4.0.3",
     "@playwright/test": "^1.58.2",
     "@types/node": "^20.12.7",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.2.1",
+    "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.24",
     "concurrently": "^8.2.2",
-    "electron": "^30.0.1",
+    "electron": "^35.7.5",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.19",
     "typescript": "^5.4.5",
-    "vite": "^5.2.11",
+    "vite": "^6.1.7",
+    "vitepress": "2.0.0-alpha.16",
     "wait-on": "^7.2.0"
   },
   "build": {
@@ -87,21 +97,28 @@
     },
     "files": [
       "dist/**/*",
+      "config/**/*",
+      "packages/**/*",
+      "bin/**/*",
+      "LICENSE",
+      "README.md",
       "package.json"
     ],
     "mac": {
+      "icon": "public/logo.icns",
       "target": [
-        "dmg",
         "zip"
       ],
       "category": "public.app-category.developer-tools"
     },
     "win": {
+      "icon": "public/logo.ico",
       "target": [
         "nsis"
       ]
     },
     "linux": {
+      "icon": "public/logo.png",
       "target": [
         "AppImage",
         "deb"

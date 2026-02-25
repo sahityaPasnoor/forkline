@@ -3,6 +3,9 @@ node_modules/
 
 # Build output
 dist/
+release/
+*.tgz
+docs/.vitepress/cache/
 
 # Logs
 *.log
@@ -31,4 +34,4 @@ playwright-report/
 # Local app/dev metadata
 .claude/
 .agent_cache/
-
+documents/private/

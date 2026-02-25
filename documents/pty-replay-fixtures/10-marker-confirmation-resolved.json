@@ -1,0 +1,27 @@
+{
+  "name": "marker_confirmation_resolved",
+  "providerHint": "claude",
+  "events": [
+    { "type": "start" },
+    {
+      "type": "output",
+      "data": "\u001b]1337;ForklineEvent=type=agent_started;provider=claude\u0007",
+      "expect": { "mode": "agent", "isBlocked": false }
+    },
+    {
+      "type": "output",
+      "data": "\u001b]1337;ForklineEvent=type=awaiting_confirmation;provider=claude;reason=Action Required: Confirm deploy (y/n)\u0007",
+      "expect": { "mode": "blocked", "isBlocked": true }
+    },
+    {
+      "type": "output",
+      "data": "\u001b]1337;ForklineEvent=type=confirmation_resolved;provider=claude\u0007",
+      "expect": { "mode": "agent", "isBlocked": false }
+    }
+  ],
+  "expectFinal": {
+    "mode": "agent",
+    "isBlocked": false,
+    "provider": "claude"
+  }
+}

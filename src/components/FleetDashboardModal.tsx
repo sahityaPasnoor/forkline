@@ -69,6 +69,7 @@ const FleetDashboardModal: React.FC<FleetDashboardModalProps> = ({
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<FleetTaskTimeline | null>(null);
   const [timelineLoading, setTimelineLoading] = useState(false);
+  const [timelineCursor, setTimelineCursor] = useState(0);
 
   const liveTaskIds = useMemo(() => new Set(liveTabs.map(t => t.id)), [liveTabs]);
   const visibleTasks = useMemo(() => {
@@ -116,7 +117,11 @@ const FleetDashboardModal: React.FC<FleetDashboardModalProps> = ({
     setTimelineLoading(true);
     const res = await window.electronAPI.fleetGetTaskTimeline(taskId);
     if (res.success && res.timeline) {
-      setTimeline(res.timeline as FleetTaskTimeline);
+      const nextTimeline = res.timeline as FleetTaskTimeline & { transcript?: FleetTaskTimeline['transcript'] };
+      setTimeline({
+        ...nextTimeline,
+        transcript: Array.isArray(nextTimeline.transcript) ? nextTimeline.transcript : []
+      });
     } else {
       setTimeline(null);
     }
@@ -138,6 +143,14 @@ const FleetDashboardModal: React.FC<FleetDashboardModalProps> = ({
     if (!isOpen || !selectedTaskId) return;
     void loadTimeline(selectedTaskId);
   }, [isOpen, selectedTaskId, loadTimeline]);
+
+  useEffect(() => {
+    if (!timeline || !Array.isArray(timeline.transcript) || timeline.transcript.length === 0) {
+      setTimelineCursor(0);
+      return;
+    }
+    setTimelineCursor(timeline.transcript.length - 1);
+  }, [timeline]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -343,6 +356,34 @@ const FleetDashboardModal: React.FC<FleetDashboardModalProps> = ({
                     ))}
                     {timeline.events.length === 0 && <div className="text-[#71717a] font-mono text-[10px]">No events.</div>}
                   </div>
+                </div>
+
+                <div className="app-panel rounded p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-[#71717a] font-mono mb-2">Prompt Forensics</div>
+                  {timeline.transcript.length === 0 ? (
+                    <div className="text-[#71717a] font-mono text-[10px]">No transcript captured.</div>
+                  ) : (
+                    <div className="space-y-2">
+                      <input
+                        type="range"
+                        min={0}
+                        max={Math.max(0, timeline.transcript.length - 1)}
+                        value={Math.min(timelineCursor, Math.max(0, timeline.transcript.length - 1))}
+                        onChange={(event) => setTimelineCursor(Number(event.target.value))}
+                        className="w-full"
+                      />
+                      {timeline.transcript[timelineCursor] && (
+                        <div className="rounded border border-[#1f1f1f] bg-[#050505] p-2">
+                          <div className="text-[10px] font-mono text-[#9ca3af]">
+                            {timeline.transcript[timelineCursor].stream} • {formatDateTime(timeline.transcript[timelineCursor].createdAt)}
+                          </div>
+                          <pre className="mt-1 whitespace-pre-wrap text-[10px] text-[#d4d4d8] font-mono max-h-48 overflow-auto">
+                            {timeline.transcript[timelineCursor].content}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

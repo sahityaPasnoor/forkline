@@ -1,0 +1,27 @@
+{
+  "name": "claude_blocked_then_resumed",
+  "providerHint": "claude",
+  "events": [
+    { "type": "start", "expect": { "mode": "booting", "isBlocked": false } },
+    {
+      "type": "output",
+      "data": "\u001b]1337;ForklineEvent=type=agent_started;provider=claude\u0007",
+      "expect": { "mode": "agent", "isBlocked": false, "provider": "claude" }
+    },
+    {
+      "type": "output",
+      "data": "Action Required: Approve (y/n)\n",
+      "expect": { "mode": "blocked", "isBlocked": true }
+    },
+    {
+      "type": "input",
+      "data": "y\r",
+      "expect": { "mode": "agent", "isBlocked": false }
+    }
+  ],
+  "expectFinal": {
+    "mode": "agent",
+    "isBlocked": false,
+    "provider": "claude"
+  }
+}
