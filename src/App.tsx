@@ -1,25 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Settings, AlertTriangle, FolderTree, GitBranch, Plus } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Settings, AlertTriangle, GitBranch, Plus, ChevronLeft, ChevronRight, MoreHorizontal } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Terminal from './components/Terminal';
 import SettingsModal from './components/SettingsModal';
 import DiffViewer from './components/DiffViewer';
 import NewTaskModal from './components/NewTaskModal';
-import ApprovalModal from './components/ApprovalModal';
-import HandoverModal from './components/HandoverModal';
+import ApprovalInboxModal from './components/ApprovalInboxModal';
 import TodoPanel from './components/TodoPanel';
 import WelcomeEmptyState from './components/WelcomeEmptyState';
-import ProjectManagerModal from './components/ProjectManagerModal';
 import WorktreeInventoryModal from './components/WorktreeInventoryModal';
 import LivingSpecModal from './components/LivingSpecModal';
-import FlightDeckModal from './components/FlightDeckModal';
 import { useOrchestrator } from './hooks/useOrchestrator';
 import { APP_THEMES, DEFAULT_THEME_ID } from './lib/themes';
 
 const SIDEBAR_WIDTH_KEY = 'orchestrator.sidebar.width';
 const PROJECT_HISTORY_KEY = 'orchestrator.project.paths';
+const PROJECT_RAIL_EXPANDED_KEY = 'orchestrator.project.rail.expanded';
 const THEME_KEY = 'orchestrator.theme';
-const PROJECT_SELECT_ADD = '__add_project__';
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX_FALLBACK = 520;
 const normalizeProjectPath = (value: string) => value.trim().replace(/\\/g, '/').replace(/\/+$/, '');
@@ -54,6 +51,10 @@ const formatProjectLabel = (path: string) => {
   if (!shortPath || shortPath === path) return name;
   return `${name} (${shortPath})`;
 };
+const getTaskDisplayName = (tab: { name: string; displayName?: string }) => {
+  const displayName = typeof tab.displayName === 'string' ? tab.displayName.trim() : '';
+  return displayName || tab.name;
+};
 const buildProjectLabels = (paths: string[]) => {
   const counts = new Map<string, number>();
   paths.forEach((path) => {
@@ -78,23 +79,19 @@ interface WorkspaceInfo {
   defaultBranch: string | null;
 }
 
-interface FlightDeckSession {
-  taskId: string;
-  running: boolean;
-  isBlocked: boolean;
-  exitCode: number | null;
-  signal?: number;
-  tailPreview?: string[];
-  resource?: { taskId: string; sessionId: string; port: number; host: string } | null;
-  sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
-}
-
 interface CommandPaletteItem {
   id: string;
   label: string;
-  type: 'project' | 'task';
+  taskId: string;
   projectPath: string;
+}
+
+type SpawnPhase = 'creating_worktree' | 'preparing_environment' | 'launching_agent';
+
+interface SpawnProgressState {
+  taskName: string;
   taskId?: string;
+  phase: SpawnPhase;
 }
 
 function App() {
@@ -107,8 +104,6 @@ function App() {
       context,
       envVars,
       defaultCommand,
-      mcpServers,
-      mcpEnabled,
       packageStoreStrategy,
       dependencyCloneMode,
       pnpmStorePath,
@@ -121,9 +116,12 @@ function App() {
       taskTodos,
       taskUsage,
       collisions,
-      pendingApproval,
-      pendingApprovalCount,
+      pendingApprovals,
+      blockedTasks,
+      approvalInboxCount,
+      attentionEvents,
       livingSpecPreferences,
+      livingSpecCandidatesByProject,
       livingSpecSelectionPrompt
     },
     actions: {
@@ -133,8 +131,6 @@ function App() {
       setContext,
       setEnvVars,
       setDefaultCommand,
-      setMcpServers,
-      setMcpEnabled,
       setPackageStoreStrategy,
       setDependencyCloneMode,
       setPnpmStorePath,
@@ -143,12 +139,16 @@ function App() {
       setSandboxMode,
       setNetworkGuard,
       createTask,
+      renameTaskSession,
       markTaskBootstrapped,
       closeTaskById,
-      handoverTask,
       restoreExistingWorktree,
-      approvePendingRequest,
-      rejectPendingRequest,
+      approveApprovalRequest,
+      rejectApprovalRequest,
+      approveAllPendingRequests,
+      rejectAllPendingRequests,
+      respondToBlockedTask,
+      respondToAllBlockedTasks,
       resolveLivingSpecSelectionPrompt,
       dismissLivingSpecSelectionPrompt
     }
@@ -156,17 +156,18 @@ function App() {
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
-  const [isHandoverOpen, setIsHandoverOpen] = useState(false);
-  const [isProjectManagerOpen, setIsProjectManagerOpen] = useState(false);
+  const [isApprovalInboxOpen, setIsApprovalInboxOpen] = useState(false);
   const [isWorktreeInventoryOpen, setIsWorktreeInventoryOpen] = useState(false);
-  const [isFlightDeckOpen, setIsFlightDeckOpen] = useState(false);
-  const [flightDeckSessions, setFlightDeckSessions] = useState<FlightDeckSession[]>([]);
+  const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
+  const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState('');
   const [commandPaletteActiveIndex, setCommandPaletteActiveIndex] = useState(0);
   const commandPaletteItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const commandPaletteInputRef = useRef<HTMLInputElement | null>(null);
   const [diffOpen, setDiffOpen] = useState(false);
   const [diffTask, setDiffTask] = useState<string | null>(null);
+  const [spawnProgress, setSpawnProgress] = useState<SpawnProgressState | null>(null);
   const [theme, setTheme] = useState<string>(() => {
     if (typeof window === 'undefined') return DEFAULT_THEME_ID;
     const stored = window.localStorage.getItem(THEME_KEY) || '';
@@ -178,7 +179,9 @@ function App() {
     defaultBranch: null
   });
   const [workspaceBranches, setWorkspaceBranches] = useState<string[]>([]);
+  const [repositoryWebUrl, setRepositoryWebUrl] = useState<string | null>(null);
   const [operationNotice, setOperationNotice] = useState<string | null>(null);
+  const [mountedTerminalTaskIds, setMountedTerminalTaskIds] = useState<string[]>([]);
   const [projectPaths, setProjectPaths] = useState<string[]>(() => {
     if (typeof window === 'undefined') return [];
     try {
@@ -190,6 +193,10 @@ function App() {
     } catch {
       return [];
     }
+  });
+  const [isProjectRailExpanded, setIsProjectRailExpanded] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.localStorage.getItem(PROJECT_RAIL_EXPANDED_KEY) === '1';
   });
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     if (typeof window === 'undefined') return 280;
@@ -262,6 +269,11 @@ function App() {
   }, [projectPaths]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(PROJECT_RAIL_EXPANDED_KEY, isProjectRailExpanded ? '1' : '0');
+  }, [isProjectRailExpanded]);
+
+  useEffect(() => {
     let cancelled = false;
     const loadFleetProjects = async () => {
       const res = await window.electronAPI.fleetListProjects();
@@ -311,16 +323,19 @@ function App() {
       if (!normalized) {
         setWorkspaceInfo({ isRepo: false, currentBranch: null, defaultBranch: null });
         setWorkspaceBranches([]);
+        setRepositoryWebUrl(null);
         return;
       }
 
-      const [info, branchesRes] = await Promise.all([
-        window.electronAPI.getWorkspaceInfo(normalized),
-        window.electronAPI.listBranches(normalized)
+      const [info, branchesRes, repoUrlRes] = await Promise.all([
+        window.electronAPI.getWorkspaceInfo(normalized).catch((error) => ({ success: false as const, error: error?.message || 'workspace info failed' })),
+        window.electronAPI.listBranches(normalized).catch((error) => ({ success: false as const, error: error?.message || 'branch listing failed', branches: [] })),
+        window.electronAPI.getRepositoryWebUrl(normalized).catch((error) => ({ success: false as const, error: error?.message || 'repo url lookup failed' }))
       ]);
       if (cancelled || !info.success) {
         setWorkspaceInfo({ isRepo: false, currentBranch: null, defaultBranch: null });
         setWorkspaceBranches([]);
+        setRepositoryWebUrl(null);
         return;
       }
       setWorkspaceInfo({
@@ -330,6 +345,7 @@ function App() {
       });
       const branches = Array.isArray(branchesRes.branches) ? branchesRes.branches : [];
       setWorkspaceBranches(branches);
+      setRepositoryWebUrl(repoUrlRes.success && typeof repoUrlRes.webUrl === 'string' ? repoUrlRes.webUrl : null);
     };
     void loadWorkspaceInfo();
     return () => {
@@ -338,55 +354,66 @@ function App() {
   }, [basePath]);
 
   useEffect(() => {
-    let cancelled = false;
-    const pollSessions = async () => {
-      const res = await window.electronAPI.listPtySessions();
-      if (cancelled || !res.success || !Array.isArray(res.sessions)) return;
-      setFlightDeckSessions(res.sessions.map((session) => ({
-        taskId: session.taskId,
-        running: !!session.running,
-        isBlocked: !!session.isBlocked,
-        exitCode: typeof session.exitCode === 'number' || session.exitCode === null ? session.exitCode : null,
-        signal: session.signal,
-        tailPreview: Array.isArray(session.tailPreview) ? session.tailPreview : [],
-        resource: session.resource || null,
-        sandbox: session.sandbox || null
-      })));
-    };
-    void pollSessions();
-    const timer = window.setInterval(() => {
-      void pollSessions();
-    }, 1500);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const isOpenPalette = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k';
       if (isOpenPalette) {
         event.preventDefault();
-        setIsCommandPaletteOpen(true);
+        event.stopPropagation();
+        if (isCommandPaletteOpen) {
+          setIsCommandPaletteOpen(false);
+          setCommandPaletteQuery('');
+          setCommandPaletteActiveIndex(0);
+          commandPaletteItemRefs.current = [];
+        } else {
+          setIsCommandPaletteOpen(true);
+        }
         return;
       }
       if (event.key === 'Escape' && isCommandPaletteOpen) {
         setIsCommandPaletteOpen(false);
         setCommandPaletteQuery('');
+        setCommandPaletteActiveIndex(0);
+        commandPaletteItemRefs.current = [];
       }
     };
-    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown, true);
+    const onPaletteShortcut = () => {
+      setIsCommandPaletteOpen(true);
+    };
+    window.addEventListener('orchestrator:open-command-palette', onPaletteShortcut as EventListener);
     return () => {
-      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('orchestrator:open-command-palette', onPaletteShortcut as EventListener);
     };
   }, [isCommandPaletteOpen]);
 
+  useEffect(() => {
+    if (!isHeaderMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!headerMenuRef.current) return;
+      const target = event.target as Node | null;
+      if (target && headerMenuRef.current.contains(target)) return;
+      setIsHeaderMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsHeaderMenuOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isHeaderMenuOpen]);
+
   const normalizedBasePath = normalizeProjectPath(basePath);
-  const visibleTabs = normalizedBasePath
-    ? tabs.filter(tab => normalizeProjectPath(tab.basePath) === normalizedBasePath)
-    : tabs;
+  const visibleTabs = useMemo(() => (
+    normalizedBasePath
+      ? tabs.filter(tab => normalizeProjectPath(tab.basePath) === normalizedBasePath)
+      : tabs
+  ), [normalizedBasePath, tabs]);
   useEffect(() => {
     if (visibleTabs.length === 0) return;
     if (activeTab && visibleTabs.some(tab => tab.id === activeTab)) return;
@@ -401,15 +428,27 @@ function App() {
   const currentDirectoryLabel = getDisplayDirectory(basePath, currentWorkingPath);
   const activeTaskTodos = activeTask ? (taskTodos[activeTask.id] || []) : [];
   const activeTaskStatus = activeTask ? taskStatuses[activeTask.id] : undefined;
-  const activeTaskLivingSpecPreference = activeTask
-    ? livingSpecPreferences[normalizeProjectPath(activeTask.basePath)]
-    : undefined;
+  const tabsById = useMemo(() => new Map(tabs.map((tab) => [tab.id, tab])), [tabs]);
+  const sidebarTabs = useMemo(
+    () => visibleTabs.map((tab) => ({ id: tab.id, name: getTaskDisplayName(tab), agent: tab.agent, tags: tab.tags })),
+    [visibleTabs]
+  );
+  const mountedTerminalTabs = useMemo(() => (
+    mountedTerminalTaskIds.flatMap((taskId) => {
+      const tab = tabsById.get(taskId);
+      if (!tab?.worktreePath) return [];
+      return [tab];
+    })
+  ), [mountedTerminalTaskIds, tabsById]);
+  const activeProjectLivingSpecCandidates = livingSpecCandidatesByProject[normalizeProjectPath(basePath)] || [];
   const parentBranch = workspaceInfo.defaultBranch || workspaceInfo.currentBranch || 'main';
   const selectableBranches = Array.from(new Set([parentBranch, ...workspaceBranches].filter(Boolean))).sort((a, b) => a.localeCompare(b));
-  const sortedProjectPaths = Array.from(new Set([basePath, ...projectPaths, ...tabs.map(tab => tab.basePath)]))
-    .map(path => normalizeProjectPath(path))
-    .filter(path => !!path && !isLikelyWorktreePath(path))
-    .sort((a, b) => a.localeCompare(b));
+  const sortedProjectPaths = useMemo(() => (
+    Array.from(new Set([basePath, ...projectPaths, ...tabs.map(tab => tab.basePath)]))
+      .map(path => normalizeProjectPath(path))
+      .filter(path => !!path && !isLikelyWorktreePath(path))
+      .sort((a, b) => a.localeCompare(b))
+  ), [basePath, projectPaths, tabs]);
   const selectableProjectPaths = sortedProjectPaths;
   const projectLabelByPath = buildProjectLabels(selectableProjectPaths);
   const workspaceReady = !!basePath.trim() && !!sourceStatus?.valid;
@@ -435,34 +474,69 @@ function App() {
       : activeStateLabel === 'standby'
         ? 'text-zinc-300 border-zinc-800 bg-[#121212]'
         : 'text-emerald-300 border-emerald-900/80 bg-[#0b1a13]';
-  const headerOffsetClass = collisions.length > 0
-    ? (operationNotice ? 'mt-20' : 'mt-12')
-    : (operationNotice ? 'mt-10' : '');
-  const activeSession = activeTask
-    ? flightDeckSessions.find((session) => session.taskId === activeTask.id)
-    : null;
-  const briefingSummary = activeTask?.prompt?.trim()
-    ? activeTask.prompt.trim().split('\n')[0].slice(0, 220)
-    : 'No explicit task prompt provided.';
-  const briefingTail = activeSession?.tailPreview?.length ? activeSession.tailPreview : ['No recent output captured yet.'];
-  const activeProjectLabel = normalizedBasePath
-    ? (projectLabelByPath[normalizedBasePath] || basename(normalizedBasePath))
-    : 'No project selected';
+  const operationNoticeTone = useMemo<'error' | 'success' | 'info'>(() => {
+    const text = (operationNotice || '').trim().toLowerCase();
+    if (!text) return 'info';
+    if (
+      text.includes('failed')
+      || text.includes('error')
+      || text.includes('cannot')
+      || text.includes('no remote repository url')
+    ) {
+      return 'error';
+    }
+    if (text.includes('merged') || text.includes('deleted') || text.includes('completed')) {
+      return 'success';
+    }
+    return 'info';
+  }, [operationNotice]);
+  const latestSpecDeviation = attentionEvents.find((event) => event.kind === 'spec_deviation');
+  const latestContextAlert = attentionEvents.find((event) => event.kind === 'context_alert');
+  const shouldShowNoticeStack = collisions.length > 0 || !!operationNotice || !!latestSpecDeviation || !!latestContextAlert;
+  const headerAgentName = activeTask ? getTaskDisplayName(activeTask) : 'No active session';
+  const headerPathHint = currentDirectoryLabel && currentDirectoryLabel !== '-' ? currentDirectoryLabel : (currentWorkingPath || basePath || '-');
   const paletteItems: CommandPaletteItem[] = [
-    ...selectableProjectPaths.map((projectPath) => ({
-      id: `project:${projectPath}`,
-      label: `Project: ${projectLabelByPath[projectPath] || formatProjectLabel(projectPath)}`,
-      type: 'project' as const,
-      projectPath
-    })),
     ...tabs.map((tab) => ({
       id: `task:${tab.id}`,
-      label: `Task: ${tab.name} (${basename(tab.basePath)})`,
-      type: 'task' as const,
+      label: `${getTaskDisplayName(tab)} (${basename(tab.basePath)})`,
       projectPath: tab.basePath,
       taskId: tab.id
     }))
   ];
+  const activeTaskSpawnPhase = (() => {
+    if (!activeTask) return null;
+    if (spawnProgress && !spawnProgress.taskId && activeTask.hasBootstrapped === false && !activeTask.worktreePath) {
+      return spawnProgress.phase;
+    }
+    if (spawnProgress?.taskId === activeTask.id) {
+      return spawnProgress.phase;
+    }
+    if (activeTask.hasBootstrapped === false) {
+      return activeTask.worktreePath ? 'launching_agent' : 'preparing_environment';
+    }
+    return null;
+  })();
+  const activeTaskSpawnLabel = activeTaskSpawnPhase === 'creating_worktree'
+    ? 'Creating worktree'
+    : activeTaskSpawnPhase === 'preparing_environment'
+      ? 'Preparing environment'
+      : activeTaskSpawnPhase === 'launching_agent'
+        ? 'Launching agent'
+        : '';
+  const activeTaskSpawnName = spawnProgress?.taskName || (activeTask ? getTaskDisplayName(activeTask) : '');
+  const showActiveSpawnOverlay = !!activeTaskSpawnPhase;
+
+  useEffect(() => {
+    setMountedTerminalTaskIds((prev) => {
+      const liveTaskIds = new Set(
+        tabs.filter((tab) => !!tab.worktreePath).map((tab) => tab.id)
+      );
+      const retained = prev.filter((taskId) => liveTaskIds.has(taskId));
+      if (!activeTask?.worktreePath) return retained;
+      if (retained.includes(activeTask.id)) return retained;
+      return [...retained, activeTask.id];
+    });
+  }, [tabs, activeTask?.id, activeTask?.worktreePath]);
   const normalizedPaletteQuery = commandPaletteQuery.trim().toLowerCase();
   const filteredPaletteItems = normalizedPaletteQuery
     ? paletteItems.filter((item) => item.label.toLowerCase().includes(normalizedPaletteQuery))
@@ -477,6 +551,17 @@ function App() {
     const hasRunning = projectTabs.some((tab) => taskStatuses[tab.id]?.isReady);
     return hasRunning ? 'bg-emerald-400' : 'bg-[#2f2f2f]';
   };
+  const inboxTaskMetaById = useMemo(() => {
+    const map: Record<string, { taskName: string; projectPath: string; worktreePath?: string }> = {};
+    tabs.forEach((tab) => {
+      map[tab.id] = {
+        taskName: getTaskDisplayName(tab),
+        projectPath: tab.basePath,
+        worktreePath: tab.worktreePath
+      };
+    });
+    return map;
+  }, [tabs]);
 
   const handleProjectSwitch = (path: string) => {
     const normalized = normalizeProjectPath(path);
@@ -493,16 +578,6 @@ function App() {
     }
   };
 
-  const removeProjectPath = (path: string) => {
-    const normalized = normalizeProjectPath(path);
-    if (!normalized) return;
-    if (normalized === normalizedBasePath) {
-      setOperationNotice('Current workspace cannot be removed.');
-      return;
-    }
-    setProjectPaths(prev => prev.filter(entry => normalizeProjectPath(entry) !== normalized));
-  };
-
   const handleBrowseProject = async (activate: boolean) => {
     const selectedPath = await window.electronAPI.openDirectoryDialog();
     if (!selectedPath) return;
@@ -517,13 +592,26 @@ function App() {
     setProjectPaths(prev => Array.from(new Set([...prev, normalized])));
   };
 
-  const handleProjectSelect = (selection: string) => {
-    if (selection === PROJECT_SELECT_ADD) {
-      void handleBrowseProject(true);
+  const handleOpenRepoInBrowser = useCallback(async () => {
+    const normalizedBase = normalizeProjectPath(basePath);
+    let candidate = typeof repositoryWebUrl === 'string' ? repositoryWebUrl.trim() : '';
+    if (!candidate && normalizedBase) {
+      const repoRes = await window.electronAPI.getRepositoryWebUrl(normalizedBase)
+        .catch((error) => ({ success: false as const, error: error?.message || 'repo url lookup failed' }));
+      if (repoRes.success && typeof repoRes.webUrl === 'string') {
+        candidate = repoRes.webUrl.trim();
+        setRepositoryWebUrl(candidate);
+      }
+    }
+    if (!candidate) {
+      setOperationNotice('No remote repository URL found for this project.');
       return;
     }
-    handleProjectSwitch(selection);
-  };
+    const result = await window.electronAPI.openExternalUrl(candidate);
+    if (!result.success) {
+      setOperationNotice(`Failed to open repository URL: ${result.error || 'unknown error'}.`);
+    }
+  }, [basePath, repositoryWebUrl]);
 
   const closeCommandPalette = useCallback(() => {
     setIsCommandPaletteOpen(false);
@@ -533,15 +621,8 @@ function App() {
   }, []);
 
   const handleCommandPaletteSelect = (item: CommandPaletteItem) => {
-    if (item.type === 'project') {
-      handleProjectSwitch(item.projectPath);
-      closeCommandPalette();
-      return;
-    }
-    if (item.taskId) {
-      handleProjectSwitch(item.projectPath);
-      setActiveTab(item.taskId);
-    }
+    handleProjectSwitch(item.projectPath);
+    setActiveTab(item.taskId);
     closeCommandPalette();
   };
 
@@ -569,18 +650,65 @@ function App() {
     activeRow.scrollIntoView({ block: 'nearest' });
   }, [commandPaletteActiveIndex, isCommandPaletteOpen, visiblePaletteItems.length]);
 
+  useEffect(() => {
+    if (!isCommandPaletteOpen) return;
+    const rafId = requestAnimationFrame(() => {
+      commandPaletteInputRef.current?.focus();
+      commandPaletteInputRef.current?.select();
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [isCommandPaletteOpen]);
+
+  useEffect(() => {
+    if (!spawnProgress?.taskId) return;
+    const task = tabs.find((tab) => tab.id === spawnProgress.taskId);
+    if (!task) {
+      setSpawnProgress(null);
+      return;
+    }
+    if (task.hasBootstrapped) {
+      setSpawnProgress(null);
+      return;
+    }
+    if (task.worktreePath && spawnProgress.phase !== 'launching_agent') {
+      setSpawnProgress((prev) => (
+        prev && prev.taskId === task.id
+          ? { ...prev, phase: 'launching_agent' }
+          : prev
+      ));
+      return;
+    }
+    if (!task.worktreePath && spawnProgress.phase !== 'preparing_environment') {
+      setSpawnProgress((prev) => (
+        prev && prev.taskId === task.id
+          ? { ...prev, phase: 'preparing_environment' }
+          : prev
+      ));
+    }
+  }, [spawnProgress, tabs]);
+
   const handleNewTaskSubmit = async (
     rawTaskName: string,
     agentCommand: string,
     prompt: string,
     baseBranch: string,
     capabilities: { autoMerge: boolean },
-    options?: { createBaseBranchIfMissing?: boolean }
+    options?: {
+      createBaseBranchIfMissing?: boolean;
+      dependencyCloneMode?: 'copy_on_write' | 'full_copy';
+      livingSpecOverridePath?: string;
+    }
   ) => {
     if (!basePath || !sourceStatus?.valid) {
       alert('Please select a valid base project path first.');
       return;
     }
+
+    const trimmedTaskName = rawTaskName.trim() || 'new-session';
+    setSpawnProgress({
+      taskName: trimmedTaskName,
+      phase: 'creating_worktree'
+    });
 
     const result = await createTask({
       rawTaskName,
@@ -588,21 +716,31 @@ function App() {
       prompt,
       baseBranch,
       createBaseBranchIfMissing: options?.createBaseBranchIfMissing === true,
+      dependencyCloneMode: options?.dependencyCloneMode,
+      livingSpecOverridePath: options?.livingSpecOverridePath,
       capabilities,
       activate: true
     });
 
     if (!result.success) {
+      setSpawnProgress(null);
       alert(`Git Worktree Setup Failed: ${result.error}`);
+      return;
     }
+
+    setSpawnProgress({
+      taskName: trimmedTaskName,
+      taskId: result.taskId,
+      phase: 'preparing_environment'
+    });
   };
 
-  const handleMergeClick = (id: string) => {
+  const handleMergeClick = useCallback((id: string) => {
     const tab = tabs.find(t => t.id === id);
     if (!tab?.worktreePath) return;
     setDiffTask(id);
     setDiffOpen(true);
-  };
+  }, [tabs]);
 
   const handleConfirmMerge = async () => {
     if (!diffTask) return;
@@ -612,10 +750,10 @@ function App() {
       alert(`Failed to merge worktree: ${res.error}`);
       return;
     }
-    setOperationNotice(tab ? `Merged ${tab.name} into ${parentBranch}.` : 'Merge completed.');
+    setOperationNotice(tab ? `Merged ${getTaskDisplayName(tab)} into ${parentBranch}.` : 'Merge completed.');
   };
 
-  const handleDeleteClick = async (id: string) => {
+  const handleDeleteClick = useCallback(async (id: string) => {
     const tab = tabs.find(t => t.id === id);
     if (!tab) return false;
 
@@ -627,9 +765,13 @@ function App() {
       alert(`Failed to delete worktree: ${res.error}`);
       return false;
     }
-    setOperationNotice(`Deleted worktree for ${tab.name}.`);
+    setOperationNotice(`Deleted worktree for ${getTaskDisplayName(tab)}.`);
     return true;
-  };
+  }, [tabs, closeTaskById]);
+
+  const handleTerminalDelete = useCallback((taskId: string) => {
+    void handleDeleteClick(taskId);
+  }, [handleDeleteClick]);
 
   const handleDeleteWorktree = async (projectPath: string, worktreePath: string, branchName?: string | null) => {
     const normalizedWorktreePath = normalizeProjectPath(worktreePath);
@@ -654,56 +796,115 @@ function App() {
     setIsWorktreeInventoryOpen(false);
   };
 
-  const handleHandoverSubmit = (command: string, prompt: string) => {
-    if (!activeTab) return;
-    handoverTask(activeTab, command, prompt);
-  };
-
   return (
     <div className="flex h-screen w-full relative overflow-hidden">
-      <aside className="w-14 shrink-0 border-r border-[#151515] bg-[#030303] flex flex-col items-center py-3 gap-2">
-        {selectableProjectPaths.map((projectPath) => {
-          const normalized = normalizeProjectPath(projectPath);
-          const isActiveProject = normalized === normalizeProjectPath(basePath);
-          const initial = basename(projectPath).slice(0, 1).toUpperCase();
-          return (
+      <aside className={`${isProjectRailExpanded ? 'w-56' : 'w-14'} shrink-0 border-r border-[var(--panel-border)] bg-[var(--panel-subtle)] flex flex-col py-2 ${isProjectRailExpanded ? 'px-2' : 'items-center'} gap-1.5 transition-[width] duration-200`}>
+        {isProjectRailExpanded ? (
+          <div className="h-9 px-1 flex items-center justify-between">
+            <span className="text-[10px] uppercase tracking-[0.12em] font-mono text-[var(--text-tertiary)]">Projects</span>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  void handleBrowseProject(true);
+                }}
+                className="h-7 w-7 rounded-md border border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--panel)] flex items-center justify-center"
+                title="Add project"
+              >
+                <Plus size={12} />
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsProjectRailExpanded(false)}
+                className="h-7 w-7 rounded-md border border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--panel)] flex items-center justify-center"
+                title="Collapse project rail"
+              >
+                <ChevronLeft size={12} />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-1">
             <button
-              key={projectPath}
               type="button"
-              onClick={() => handleProjectSwitch(projectPath)}
-              className={`relative w-9 h-9 rounded-lg border text-[11px] font-mono flex items-center justify-center transition-colors ${
-                isActiveProject
-                  ? 'border-white text-white bg-[#111111]'
-                  : 'border-[#1f1f1f] text-[#a3a3a3] bg-[#050505] hover:border-[#3a3a3a] hover:text-white'
-              }`}
-              title={formatProjectLabel(projectPath)}
+              onClick={() => setIsProjectRailExpanded(true)}
+              className="h-8 w-9 rounded-md border border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--panel)] flex items-center justify-center"
+              title="Expand project rail"
             >
-              {initial || '#'}
-              <span className={`absolute -bottom-1 -right-1 w-2.5 h-2.5 rounded-full border border-[#0a0a0a] ${projectStateBadge(projectPath)}`} />
+              <ChevronRight size={12} />
             </button>
-          );
-        })}
-        <button
-          type="button"
-          onClick={() => {
-            void handleBrowseProject(true);
-          }}
-          className="mt-1 w-9 h-9 rounded-lg border border-dashed border-[#2d2d2d] text-[#a3a3a3] hover:text-white hover:border-[#5a5a5a] flex items-center justify-center"
-          title="Add project"
-        >
-          <Plus size={12} />
-        </button>
+            <button
+              type="button"
+              onClick={() => {
+                void handleBrowseProject(true);
+              }}
+              className="h-8 w-9 rounded-md border border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--panel)] flex items-center justify-center"
+              title="Add project"
+            >
+              <Plus size={12} />
+            </button>
+          </div>
+        )}
+
+        <div className={`min-h-0 flex-1 ${isProjectRailExpanded ? 'overflow-y-auto space-y-1 pr-0.5' : 'overflow-y-auto flex flex-col items-center gap-1'}`}>
+          {selectableProjectPaths.map((projectPath) => {
+            const normalized = normalizeProjectPath(projectPath);
+            const isActiveProject = normalized === normalizeProjectPath(basePath);
+            const initial = basename(projectPath).slice(0, 1).toUpperCase();
+            const stateDot = projectStateBadge(projectPath);
+            return (
+              <button
+                key={projectPath}
+                type="button"
+                onClick={() => handleProjectSwitch(projectPath)}
+                className={`relative rounded-md text-[11px] font-mono flex items-center transition-colors border ${
+                  isProjectRailExpanded
+                    ? `w-full h-10 px-2 justify-start gap-2 ${
+                      isActiveProject
+                        ? 'border-[var(--input-border-focus)] bg-[var(--panel-strong)] text-[var(--text-primary)]'
+                        : 'border-transparent bg-transparent text-[var(--text-secondary)] hover:bg-[var(--panel)] hover:text-[var(--text-primary)]'
+                    }`
+                    : `w-9 h-9 justify-center ${isActiveProject ? 'border-[var(--input-border-focus)] bg-[var(--panel-strong)] text-[var(--text-primary)]' : 'border-transparent text-[var(--text-secondary)] hover:bg-[var(--panel)]'}`
+                }`}
+                title={formatProjectLabel(projectPath)}
+              >
+                {isProjectRailExpanded ? (
+                  <>
+                    <span className="w-5 h-5 rounded border border-[var(--panel-border)] bg-[var(--panel)] text-[var(--text-secondary)] flex items-center justify-center text-[10px] shrink-0">
+                      {initial || '#'}
+                    </span>
+                    <span className="truncate flex-1 text-left">{projectLabelByPath[projectPath] || basename(projectPath)}</span>
+                    <span className={`w-2 h-2 rounded-full border border-[var(--panel)] shrink-0 ${stateDot}`} />
+                  </>
+                ) : (
+                  <span className="relative w-5 h-5 rounded border border-[var(--panel-border)] bg-[var(--panel)] text-[10px] text-[var(--text-secondary)] flex items-center justify-center">
+                    {initial || '#'}
+                    <span className={`absolute -right-1 -bottom-1 w-2.5 h-2.5 rounded-full border border-[var(--panel)] ${stateDot}`} />
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
       </aside>
 
       <Sidebar
-        tabs={visibleTabs.map(t => ({ id: t.id, name: t.name, agent: t.agent }))}
+        tabs={sidebarTabs}
         activeTab={activeTab}
         statuses={taskStatuses}
         usageByTask={taskUsage}
         width={sidebarWidth}
+        repoWebUrl={repositoryWebUrl}
         onSelectTab={setActiveTab}
-        onDeleteTask={(taskId) => {
-          void handleDeleteClick(taskId);
+        onOpenRepo={() => {
+          void handleOpenRepoInBrowser();
+        }}
+        onDeleteTask={handleTerminalDelete}
+        onRenameTask={(taskId, nextName) => {
+          const renamed = renameTaskSession(taskId, nextName);
+          if (renamed) {
+            setOperationNotice('Session name updated.');
+          }
         }}
         onNewTask={() => {
           if (!workspaceReady) {
@@ -714,7 +915,7 @@ function App() {
         }}
       />
       <div
-        className="w-1.5 shrink-0 mx-1 my-2 rounded bg-transparent hover:bg-[#1f1f1f] active:bg-[#2d2d2d] cursor-col-resize"
+        className="w-1.5 shrink-0 mx-1 my-2 rounded bg-transparent hover:bg-[var(--panel-border)] active:bg-[var(--btn-ghost-border-hover)] cursor-col-resize"
         onMouseDown={(event) => {
           event.preventDefault();
           setIsSidebarResizing(true);
@@ -724,187 +925,251 @@ function App() {
       />
 
       <main className="flex-1 min-w-0 flex flex-col h-full relative z-10 pt-2 pr-2 pb-2">
-        {collisions.length > 0 && (
-          <div className="absolute top-2 left-0 right-2 h-10 bg-[#1a0505] border border-red-900 rounded-lg flex items-center justify-center z-40 text-xs font-semibold text-red-400 shadow-sm">
-            <AlertTriangle size={14} className="mr-2 text-red-500" />
-            Collision Detected: Multiple agents modifying ({collisions.join(', ')}).
-          </div>
-        )}
-        {operationNotice && (
-          <div className={`absolute ${collisions.length > 0 ? 'top-14' : 'top-2'} left-0 right-2 h-9 app-panel border border-[#2a2a2a] rounded-lg flex items-center justify-center z-40 text-[11px] font-medium text-[#d1d5db] shadow-sm px-3`}>
-            {operationNotice}
-          </div>
-        )}
-
-        <div className={`app-panel rounded-xl px-3 py-2 z-30 ${headerOffsetClass}`}>
-          <div className="flex items-center gap-3 min-w-0 flex-wrap lg:flex-nowrap">
-            <div className="flex items-center gap-2 shrink-0 min-w-0">
-              <span className="text-[11px] text-[#6b7280] uppercase tracking-[0.14em] font-mono">Project</span>
-              <select
-                value={normalizeProjectPath(basePath) || selectableProjectPaths[0] || ''}
-                onChange={(e) => handleProjectSelect(e.target.value)}
-                className="input-stealth rounded px-2 py-1.5 text-xs font-mono max-w-[14rem] min-w-[10rem]"
-              >
-                {selectableProjectPaths.length === 0 && <option value={basePath || ''}>{basePath || 'No project'}</option>}
-                {selectableProjectPaths.map(path => (
-                  <option key={path} value={path}>
-                    {projectLabelByPath[path] || formatProjectLabel(path)}
-                  </option>
-                ))}
-                <option value={PROJECT_SELECT_ADD}>+ Add workspace...</option>
-              </select>
-              <button
-                onClick={() => {
-                  void handleBrowseProject(true);
-                }}
-                className="w-7 h-7 rounded-md btn-ghost flex items-center justify-center"
-                title="Add workspace"
-              >
-                <Plus size={13} />
-              </button>
-              {workspaceInfo.isRepo && (
-                <span className="text-[10px] uppercase tracking-wider border border-[#2a2a2a] rounded px-2 py-0.5 font-mono text-[#a3a3a3]">
-                  {parentBranch}
+        {shouldShowNoticeStack && (
+          <div className="space-y-2 mb-2">
+            {collisions.length > 0 && (
+              <div className="h-10 bg-[#1a0505] border border-red-900 rounded-lg flex items-center justify-center z-40 text-xs font-semibold text-red-400 shadow-sm px-3">
+                <AlertTriangle size={14} className="mr-2 text-red-500 shrink-0" />
+                <span className="truncate">
+                  Collision Detected: Multiple agents modifying ({collisions.join(', ')}).
                 </span>
-              )}
-            </div>
+              </div>
+            )}
+            {operationNotice && (
+              <div
+                className={`h-9 rounded-lg flex items-center z-40 text-[11px] font-semibold shadow-sm px-3 gap-2 ${
+                  operationNoticeTone === 'error'
+                    ? 'border border-red-900/80 bg-[#1a0505] text-red-300'
+                    : operationNoticeTone === 'success'
+                      ? 'border border-emerald-900/80 bg-[#0b1a13] text-emerald-300'
+                      : 'app-panel border border-[var(--panel-border)] text-[var(--text-primary)]'
+                }`}
+                role={operationNoticeTone === 'error' ? 'alert' : undefined}
+              >
+                {operationNoticeTone === 'error' && <AlertTriangle size={13} className="shrink-0 text-red-400" />}
+                <span className="truncate">{operationNotice}</span>
+              </div>
+            )}
+            {latestSpecDeviation && (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab(latestSpecDeviation.taskId);
+                  setIsApprovalInboxOpen(true);
+                }}
+                className="btn-warning w-full h-9 rounded-lg z-40 text-[11px] px-3"
+              >
+                <span className="truncate">Spec deviation: {latestSpecDeviation.taskName} • {latestSpecDeviation.reason}</span>
+              </button>
+            )}
+            {latestContextAlert && !latestSpecDeviation && (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab(latestContextAlert.taskId);
+                  setIsApprovalInboxOpen(true);
+                }}
+                className="btn-info w-full h-9 rounded-lg z-40 text-[11px] px-3"
+              >
+                <span className="truncate">Context alert: {latestContextAlert.taskName} • {latestContextAlert.reason}</span>
+              </button>
+            )}
+          </div>
+        )}
 
-            <div className="h-5 w-px bg-[#1f1f1f] shrink-0 hidden lg:block" />
-
+        <div className="app-panel rounded-xl px-3 py-2 z-30">
+          <div className="flex items-center gap-3 min-w-0 flex-wrap lg:flex-nowrap">
             <div className="min-w-0 flex-1 basis-full lg:basis-auto">
-              <div className="text-[11px] text-[#6b7280] uppercase tracking-[0.14em] font-mono">
-                {activeTask ? `Active Agent • ${activeTask.name}` : 'No Active Agent'}
+              <div className="text-[13px] text-[var(--text-primary)] font-mono truncate" title={headerAgentName}>
+                {headerAgentName}
               </div>
-              <div className="text-[13px] text-[#d4d4d8] font-mono truncate" title={currentWorkingPath || basePath}>
-                {activeProjectLabel}
-                <span className="text-[#7b7b80]"> • {currentDirectoryLabel}</span>
+              <div className="mt-0.5 flex items-center gap-2 min-w-0">
+                <div className="text-[11px] text-[var(--text-muted)] font-mono truncate min-w-0" title={currentWorkingPath || basePath}>
+                  {headerPathHint}
+                </div>
+                {workspaceInfo.isRepo && (
+                  <span className="text-[10px] tracking-wide border border-[var(--panel-border)] rounded px-2 py-0.5 font-mono text-[var(--text-secondary)] bg-[var(--panel-subtle)] shrink-0">
+                    base {parentBranch}
+                  </span>
+                )}
               </div>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0 ml-auto">
+            <div className="relative flex items-center gap-1.5 shrink-0 ml-auto" ref={headerMenuRef}>
               <span title="Task state: standby (no active task), provisioning (creating worktree), blocked (needs input), collision (same file edited by multiple agents), dirty (uncommitted changes), clean (no local changes)." className={`text-[10px] uppercase tracking-wider border rounded px-2 py-0.5 font-mono ${activeStateClass}`}>
                 {activeStateLabel}
               </span>
-              {pendingApprovalCount > 0 && (
-                <span className="text-[10px] text-amber-300 border border-amber-900/80 bg-[#1f1607] rounded px-2 py-0.5 font-mono">
-                  approvals {pendingApprovalCount}
-                </span>
+              {approvalInboxCount > 0 && (
+                <button
+                  onClick={() => setIsApprovalInboxOpen(true)}
+                  className="btn-warning px-2 py-0.5 text-[10px] font-mono"
+                  title="Open approval inbox"
+                >
+                  inbox {approvalInboxCount}
+                </button>
               )}
               <button
                 onClick={() => setIsCommandPaletteOpen(true)}
                 className="px-2 py-1 rounded-md btn-ghost text-[10px] font-mono"
                 title="Open command palette (Cmd/Ctrl+K)"
               >
-                Cmd+K
+                ⌘K
               </button>
               <button
-                onClick={() => setIsFlightDeckOpen(true)}
-                className="px-2 py-1 rounded-md btn-ghost text-[10px] font-mono"
-                title="Open flight deck"
+                onClick={() => setIsHeaderMenuOpen((prev) => !prev)}
+                className="btn-ghost btn-icon rounded-md"
+                title="More actions"
+                aria-expanded={isHeaderMenuOpen}
+                aria-haspopup="menu"
               >
-                Flight Deck
+                <MoreHorizontal size={14} />
               </button>
-              <button
-                onClick={() => setIsProjectManagerOpen(true)}
-                className="w-8 h-8 rounded-md btn-ghost flex items-center justify-center"
-                title="Project Manager"
-              >
-                <FolderTree size={14} />
-              </button>
-              <button
-                onClick={() => setIsWorktreeInventoryOpen(true)}
-                className="w-8 h-8 rounded-md btn-ghost flex items-center justify-center"
-                title="Worktree Inventory"
-              >
-                <GitBranch size={14} />
-              </button>
-              <button
-                onClick={() => setIsSettingsOpen(true)}
-                className="w-8 h-8 rounded-md btn-ghost flex items-center justify-center"
-                title="Workspace Settings"
-              >
-                <Settings size={14} />
-              </button>
+              {isHeaderMenuOpen && (
+                <div
+                  className="absolute right-0 top-[calc(100%+0.4rem)] w-44 app-panel border border-[var(--panel-border)] rounded-lg shadow-xl p-1.5 z-40"
+                  role="menu"
+                  aria-label="Header actions"
+                >
+                  <button
+                    type="button"
+                    className="btn-ghost w-full justify-start px-2 py-1.5 text-[11px] font-mono"
+                    onClick={() => {
+                      setIsWorktreeInventoryOpen(true);
+                      setIsHeaderMenuOpen(false);
+                    }}
+                    role="menuitem"
+                  >
+                    <GitBranch size={13} />
+                    Worktrees
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ghost w-full justify-start px-2 py-1.5 text-[11px] font-mono"
+                    onClick={() => {
+                      setIsSettingsOpen(true);
+                      setIsHeaderMenuOpen(false);
+                    }}
+                    role="menuitem"
+                  >
+                    <Settings size={13} />
+                    Settings
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
 
         <div className="flex-1 mt-2 relative z-20 overflow-hidden">
           {activeTask ? (
-            <div className="h-full flex flex-col gap-2">
-              <div className="app-panel rounded-xl border border-[#1a1a1a] px-3 py-2">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-[#9ca3af] font-mono">Briefing</div>
-                    <div className="text-[12px] text-[#e5e5e5] mt-1 truncate">{activeTask.name}</div>
-                    <div className="text-[11px] text-[#a3a3a3] mt-1 leading-relaxed">{briefingSummary}</div>
-                  </div>
-                  <div className="text-[10px] text-[#71717a] font-mono text-right shrink-0">
-                    <div>{activeSession?.resource?.port ? `PORT ${activeSession.resource.port}` : 'PORT -'}</div>
-                    <div>{activeSession?.sandbox?.active ? `sandbox ${activeSession.sandbox.mode}` : 'sandbox off'}</div>
-                  </div>
-                </div>
-                <div className="mt-2 border-t border-[#161616] pt-2 text-[11px] font-mono text-[#c5c5c5] space-y-1">
-                  {briefingTail.slice(-3).map((line, index) => (
-                    <div key={`briefing-line-${index}`} className="truncate">{line}</div>
+            <div className="h-full flex gap-2">
+              <div className="flex-1 min-w-0 app-panel rounded-xl overflow-hidden">
+                <div className="h-full flex flex-col p-1 relative z-10">
+                  {mountedTerminalTabs.map((tab) => (
+                    <div
+                      key={tab.id}
+                      className={`absolute inset-0 transition-opacity duration-75 ${
+                        tab.id === activeTask.id
+                          ? 'opacity-100 pointer-events-auto z-20'
+                          : 'opacity-0 pointer-events-none z-0'
+                      }`}
+                      aria-hidden={tab.id !== activeTask.id}
+                    >
+                      <Terminal
+                        taskId={tab.id}
+                        cwd={tab.worktreePath!}
+                        agentCommand={tab.agent}
+                        context={context}
+                        envVars={envVars}
+                        prompt={tab.prompt}
+                        isActive={tab.id === activeTask.id}
+                        shouldBootstrap={tab.hasBootstrapped === false}
+                        onBootstrapped={markTaskBootstrapped}
+                        capabilities={tab.capabilities}
+                        taskUsage={taskUsage[tab.id]}
+                        projectPath={tab.basePath}
+                        parentBranch={tab.parentBranch || parentBranch}
+                        livingSpecPreference={livingSpecPreferences[normalizeProjectPath(tab.basePath)]}
+                        livingSpecOverridePath={tab.livingSpecOverridePath}
+                        packageStoreStrategy={packageStoreStrategy}
+                        pnpmStorePath={pnpmStorePath}
+                        sharedCacheRoot={sharedCacheRoot}
+                        sandboxMode={sandboxMode}
+                        networkGuard={networkGuard}
+                        isBlocked={taskStatuses[tab.id]?.isBlocked}
+                        blockedReason={taskStatuses[tab.id]?.blockedReason}
+                        onMerge={handleMergeClick}
+                        onDelete={handleTerminalDelete}
+                      />
+                    </div>
                   ))}
-                </div>
-              </div>
-
-              <div className="flex-1 flex gap-2">
-                <div className="flex-1 min-w-0 app-panel rounded-xl overflow-hidden">
-                  <div className="h-full flex flex-col p-1 relative z-10">
-                    {activeTask.worktreePath ? (
-                        <Terminal
-                          taskId={activeTask.id}
-                          cwd={activeTask.worktreePath}
-                          agentCommand={activeTask.agent}
-                          context={context}
-                          envVars={envVars}
-                          prompt={activeTask.prompt}
-                          shouldBootstrap={activeTask.hasBootstrapped === false}
-                          onBootstrapped={() => {
-                            markTaskBootstrapped(activeTask.id);
-                          }}
-                          capabilities={activeTask.capabilities}
-                          taskUsage={taskUsage[activeTask.id]}
-                          mcpServers={mcpServers}
-                          mcpEnabled={mcpEnabled}
-                          projectPath={activeTask.basePath}
-                          livingSpecPreference={activeTaskLivingSpecPreference}
-                          packageStoreStrategy={packageStoreStrategy}
-                          pnpmStorePath={pnpmStorePath}
-                          sharedCacheRoot={sharedCacheRoot}
-                          sandboxMode={sandboxMode}
-                          networkGuard={networkGuard}
-                          isBlocked={taskStatuses[activeTask.id]?.isBlocked}
-                          blockedReason={taskStatuses[activeTask.id]?.blockedReason}
-                          onHandover={() => {
-                            setActiveTab(activeTask.id);
-                            setIsHandoverOpen(true);
-                          }}
-                          onMerge={() => {
-                            handleMergeClick(activeTask.id);
-                          }}
-                          onDelete={() => {
-                            void handleDeleteClick(activeTask.id);
-                          }}
-                        />
-                      ) : activeTask ? (
-                        <div className="h-full w-full flex flex-col items-center justify-center font-mono">
-                          <div className="mb-3 text-white text-[11px] uppercase tracking-widest">Initializing Environment</div>
-                          <div className="text-[#525252] text-[10px]">{activeTask.name}</div>
+                  {showActiveSpawnOverlay && (
+                    <div className="absolute inset-0 z-30 app-panel flex items-center justify-center">
+                      <div className="w-[22rem] max-w-[88%] rounded-lg border border-[var(--panel-border)] bg-[var(--panel-subtle)] px-4 py-4">
+                        <div className="text-[11px] uppercase tracking-[0.16em] font-mono text-[var(--text-secondary)]">
+                          Starting Session
                         </div>
-                      ) : null}
-                  </div>
+                        <div className="mt-1 text-[13px] font-mono text-[var(--text-primary)] truncate" title={activeTaskSpawnName}>
+                          {activeTaskSpawnName}
+                        </div>
+                        <div className="mt-3 space-y-2">
+                          {[
+                            { key: 'creating_worktree' as const, label: 'Create worktree' },
+                            { key: 'preparing_environment' as const, label: 'Prepare environment' },
+                            { key: 'launching_agent' as const, label: 'Launch agent' }
+                          ].map((step) => {
+                            const stepState = step.key === activeTaskSpawnPhase
+                              ? 'active'
+                              : (
+                                (activeTaskSpawnPhase === 'preparing_environment' && step.key === 'creating_worktree')
+                                || (activeTaskSpawnPhase === 'launching_agent' && (step.key === 'creating_worktree' || step.key === 'preparing_environment'))
+                                  ? 'done'
+                                  : 'pending'
+                              );
+                            return (
+                              <div key={step.key} className="flex items-center gap-2 text-[11px] font-mono">
+                                <span
+                                  className={`h-2.5 w-2.5 rounded-full ${
+                                    stepState === 'done'
+                                      ? 'bg-emerald-400'
+                                      : stepState === 'active'
+                                        ? 'bg-cyan-400 animate-pulse'
+                                        : 'bg-[var(--panel-border)]'
+                                  }`}
+                                />
+                                <span
+                                  className={
+                                    stepState === 'pending'
+                                      ? 'text-[var(--text-muted)]'
+                                      : 'text-[var(--text-primary)]'
+                                  }
+                                >
+                                  {step.label}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className="mt-3 text-[10px] font-mono text-[var(--text-tertiary)]">
+                          {activeTaskSpawnLabel}...
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {!showActiveSpawnOverlay && !activeTask.worktreePath && (
+                    <div className="h-full w-full flex flex-col items-center justify-center font-mono">
+                      <div className="mb-3 text-[var(--text-primary)] text-[11px] uppercase tracking-widest">Initializing Environment</div>
+                      <div className="text-[var(--text-muted)] text-[10px]">{getTaskDisplayName(activeTask)}</div>
+                    </div>
+                  )}
                 </div>
-
-                {activeTaskTodos.length > 0 && (
-                  <div className="hidden xl:block w-72 max-w-[32%] app-panel rounded-xl overflow-hidden">
-                    <TodoPanel todos={activeTaskTodos} />
-                  </div>
-                )}
               </div>
+
+              {activeTaskTodos.length > 0 && (
+                <div className="hidden xl:block w-72 max-w-[32%] app-panel rounded-xl overflow-hidden">
+                  <TodoPanel todos={activeTaskTodos} />
+                </div>
+              )}
             </div>
           ) : (
             <WelcomeEmptyState
@@ -934,10 +1199,6 @@ function App() {
         setEnvVars={setEnvVars}
         defaultCommand={defaultCommand}
         setDefaultCommand={setDefaultCommand}
-        mcpServers={mcpServers}
-        setMcpServers={setMcpServers}
-        mcpEnabled={mcpEnabled}
-        setMcpEnabled={setMcpEnabled}
         packageStoreStrategy={packageStoreStrategy}
         setPackageStoreStrategy={setPackageStoreStrategy}
         dependencyCloneMode={dependencyCloneMode}
@@ -978,7 +1239,7 @@ function App() {
         basePath={basePath}
         parentBranch={parentBranch}
         availableBranches={selectableBranches}
-        mcpEnabled={mcpEnabled}
+        livingSpecCandidates={activeProjectLivingSpecCandidates}
         dependencyCloneMode={dependencyCloneMode}
         onSubmit={(rawTaskName, agentCommand, prompt, baseBranch, capabilities, options) => {
           void handleNewTaskSubmit(rawTaskName, agentCommand, prompt, baseBranch, capabilities, options);
@@ -987,39 +1248,26 @@ function App() {
         availableAgents={availableAgents}
       />
 
-      <ApprovalModal
-        isOpen={!!pendingApproval}
-        request={pendingApproval}
-        taskName={tabs.find(t => t.id === pendingApproval?.taskId)?.name || 'unknown'}
-        projectPath={tabs.find(t => t.id === pendingApproval?.taskId)?.basePath || pendingApproval?.projectPath || ''}
-        queueCount={pendingApprovalCount}
-        onApprove={() => {
-          void approvePendingRequest();
+      <ApprovalInboxModal
+        isOpen={isApprovalInboxOpen}
+        onClose={() => setIsApprovalInboxOpen(false)}
+        pendingApprovals={pendingApprovals}
+        blockedTasks={blockedTasks}
+        taskMetaById={inboxTaskMetaById}
+        onSelectTask={(taskId) => {
+          setActiveTab(taskId);
+          setIsApprovalInboxOpen(false);
         }}
-        onReject={rejectPendingRequest}
-      />
-
-      <HandoverModal
-        isOpen={isHandoverOpen}
-        onClose={() => setIsHandoverOpen(false)}
-        onSubmit={handleHandoverSubmit}
-        defaultCommand={defaultCommand}
-        availableAgents={availableAgents}
-        currentAgent={activeTask?.agent}
-        taskName={activeTask?.name}
-        handoverPreview={activeTask?.worktreePath}
-      />
-
-      <ProjectManagerModal
-        isOpen={isProjectManagerOpen}
-        onClose={() => setIsProjectManagerOpen(false)}
-        currentProjectPath={basePath}
-        projectPaths={selectableProjectPaths}
-        tabs={tabs}
-        onSwitchProject={handleProjectSwitch}
-        onCreateProjectPath={(projectPath, activate) => addProjectPath(projectPath, activate)}
-        onRemoveProjectPath={removeProjectPath}
-        onBrowseProject={handleBrowseProject}
+        onApproveOne={(requestId) => {
+          void approveApprovalRequest(requestId);
+        }}
+        onRejectOne={rejectApprovalRequest}
+        onApproveAll={() => {
+          void approveAllPendingRequests();
+        }}
+        onRejectAll={rejectAllPendingRequests}
+        onRespondBlocked={respondToBlockedTask}
+        onRespondAllBlocked={respondToAllBlockedTasks}
       />
 
       <WorktreeInventoryModal
@@ -1045,20 +1293,12 @@ function App() {
         onClose={dismissLivingSpecSelectionPrompt}
       />
 
-      <FlightDeckModal
-        isOpen={isFlightDeckOpen}
-        onClose={() => setIsFlightDeckOpen(false)}
-        sessions={flightDeckSessions}
-        tabs={tabs}
-        statuses={taskStatuses}
-        onSelectTask={(taskId) => setActiveTab(taskId)}
-      />
-
       {isCommandPaletteOpen && (
-        <div className="fixed inset-0 z-[92] bg-black/70 flex items-start justify-center pt-[14vh] px-4" onClick={closeCommandPalette}>
-          <div className="w-full max-w-2xl app-panel border border-[#1a1a1a] rounded-xl overflow-hidden" onClick={(event) => event.stopPropagation()}>
-            <div className="p-3 border-b border-[#1a1a1a]">
+        <div className="fixed inset-0 z-[92] bg-black/70 flex items-start justify-center pt-[10vh] px-4" onClick={closeCommandPalette}>
+          <div className="w-full max-w-xl app-panel border border-[var(--panel-border)] rounded-xl overflow-hidden shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <div className="px-3 py-2.5 border-b border-[var(--panel-border)]">
               <input
+                ref={commandPaletteInputRef}
                 value={commandPaletteQuery}
                 onChange={(event) => setCommandPaletteQuery(event.target.value)}
                 onKeyDown={(event) => {
@@ -1084,14 +1324,13 @@ function App() {
                     if (selected) handleCommandPaletteSelect(selected);
                   }
                 }}
-                placeholder="Jump to project or task..."
-                autoFocus
+                placeholder="Jump to session..."
                 className="w-full input-stealth rounded px-3 py-2 text-sm font-mono"
               />
             </div>
-            <div className="max-h-[50vh] overflow-y-auto p-2 space-y-1">
+            <div className="max-h-[58vh] overflow-y-auto p-2 space-y-1">
               {visiblePaletteItems.length === 0 ? (
-                <div className="text-xs text-[#9ca3af] font-mono px-2 py-3">No matches</div>
+                <div className="text-xs text-[var(--text-secondary)] font-mono px-2 py-3">No matches</div>
               ) : (
                 visiblePaletteItems.map((item, index) => (
                   <button
@@ -1102,13 +1341,13 @@ function App() {
                     }}
                     onMouseEnter={() => setCommandPaletteActiveIndex(index)}
                     onClick={() => handleCommandPaletteSelect(item)}
-                    className={`w-full text-left px-3 py-2 rounded text-sm text-[#d4d4d8] font-mono ${
+                    className={`btn-ghost w-full text-left px-3 py-2 rounded text-sm font-mono ${
                       index === commandPaletteActiveIndex
-                        ? 'bg-[#101010]'
-                        : 'hover:bg-[#101010]'
+                        ? 'bg-[var(--panel-subtle)] border-[var(--input-border-focus)] text-[var(--text-primary)]'
+                        : 'border-transparent'
                     }`}
                   >
-                    {item.label}
+                    <span className="truncate">{item.label}</span>
                   </button>
                 ))
               )}

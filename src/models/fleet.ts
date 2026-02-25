@@ -69,6 +69,13 @@ export interface FleetEventRecord {
   createdAt: number;
 }
 
+export interface FleetTranscriptRecord {
+  id: number;
+  stream: 'pty_in' | 'pty_out' | 'agent';
+  content: string;
+  createdAt: number;
+}
+
 export interface FleetTaskTimeline {
   task: {
     taskId: string;
@@ -85,4 +92,5 @@ export interface FleetTaskTimeline {
   } | null;
   sessions: FleetSessionRecord[];
   events: FleetEventRecord[];
+  transcript: FleetTranscriptRecord[];
 }

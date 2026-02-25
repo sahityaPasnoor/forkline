@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, CheckCircle2, Save, X } from 'lucide-react';
 import { APP_THEMES } from '../lib/themes';
-import { resolveAgentProfile } from '../lib/agentProfiles';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -12,10 +11,6 @@ interface SettingsModalProps {
   setEnvVars: (env: string) => void;
   defaultCommand: string;
   setDefaultCommand: (cmd: string) => void;
-  mcpServers: string;
-  setMcpServers: (mcp: string) => void;
-  mcpEnabled: boolean;
-  setMcpEnabled: (enabled: boolean) => void;
   packageStoreStrategy: 'off' | 'pnpm_global' | 'polyglot_global';
   setPackageStoreStrategy: (strategy: 'off' | 'pnpm_global' | 'polyglot_global') => void;
   dependencyCloneMode: 'copy_on_write' | 'full_copy';
@@ -34,15 +29,6 @@ interface SettingsModalProps {
   theme: string;
   setTheme: (theme: string) => void;
 }
-
-const MCP_EXAMPLE = `{
-  "mcpServers": {
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"]
-    }
-  }
-}`;
 
 const normalizeMultiline = (value: string) => value.replace(/\r\n/g, '\n').trimEnd();
 
@@ -68,10 +54,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   setEnvVars,
   defaultCommand,
   setDefaultCommand,
-  mcpServers,
-  setMcpServers,
-  mcpEnabled,
-  setMcpEnabled,
   packageStoreStrategy,
   setPackageStoreStrategy,
   dependencyCloneMode,
@@ -93,8 +75,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const [localCtx, setLocalCtx] = useState(context);
   const [localEnv, setLocalEnv] = useState(envVars);
   const [localCmd, setLocalCmd] = useState(defaultCommand);
-  const [localMcp, setLocalMcp] = useState(mcpServers);
-  const [localMcpEnabled, setLocalMcpEnabled] = useState(mcpEnabled);
   const [localPackageStoreStrategy, setLocalPackageStoreStrategy] = useState<'off' | 'pnpm_global' | 'polyglot_global'>(packageStoreStrategy);
   const [localDependencyCloneMode, setLocalDependencyCloneMode] = useState<'copy_on_write' | 'full_copy'>(dependencyCloneMode);
   const [localPnpmStorePath, setLocalPnpmStorePath] = useState(pnpmStorePath);
@@ -111,7 +91,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   );
   const selectedTheme = APP_THEMES.find((appTheme) => appTheme.id === localTheme) || APP_THEMES[0];
   const selectedAgent = sortedAgents.find((agent) => agent.command === localCmd) || sortedAgents[0];
-  const selectedAgentProfile = resolveAgentProfile(selectedAgent?.command || localCmd);
 
   const invalidEnvLines = useMemo(() => findInvalidEnvLines(localEnv), [localEnv]);
   const envError =
@@ -119,28 +98,11 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       ? `Invalid ENV format on line${invalidEnvLines.length > 1 ? 's' : ''}: ${invalidEnvLines.join(', ')}`
       : '';
 
-  const mcpError = useMemo(() => {
-    if (!localMcpEnabled) return '';
-    const trimmed = localMcp.trim();
-    if (!trimmed) return '';
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        return 'MCP config must be a JSON object.';
-      }
-      return '';
-    } catch {
-      return 'MCP config is not valid JSON.';
-    }
-  }, [localMcp, localMcpEnabled]);
-
   const hasChanges = useMemo(() => {
     return (
       normalizeMultiline(localCtx) !== normalizeMultiline(context) ||
       normalizeMultiline(localEnv) !== normalizeMultiline(envVars) ||
       (localCmd || '') !== (defaultCommand || '') ||
-      normalizeMultiline(localMcp) !== normalizeMultiline(mcpServers) ||
-      localMcpEnabled !== mcpEnabled ||
       localPackageStoreStrategy !== packageStoreStrategy ||
       localDependencyCloneMode !== dependencyCloneMode ||
       normalizeMultiline(localPnpmStorePath) !== normalizeMultiline(pnpmStorePath) ||
@@ -157,8 +119,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     localCmd,
     localCtx,
     localEnv,
-    localMcp,
-    localMcpEnabled,
     localPackageStoreStrategy,
     localDependencyCloneMode,
     localPnpmStorePath,
@@ -167,8 +127,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     localSandboxMode,
     localNetworkGuard,
     localTheme,
-    mcpEnabled,
-    mcpServers,
     packageStoreStrategy,
     dependencyCloneMode,
     pnpmStorePath,
@@ -179,7 +137,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     theme
   ]);
 
-  const canSave = hasChanges && !envError && !mcpError;
+  const canSave = hasChanges && !envError;
 
   useEffect(() => {
     if (!isOpen) return;
@@ -189,8 +147,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     setLocalCmd(validCommand);
     setLocalCtx(context);
     setLocalEnv(envVars);
-    setLocalMcp(mcpServers);
-    setLocalMcpEnabled(mcpEnabled);
     setLocalPackageStoreStrategy(packageStoreStrategy);
     setLocalDependencyCloneMode(dependencyCloneMode);
     setLocalPnpmStorePath(pnpmStorePath);
@@ -206,8 +162,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     availableAgents,
     context,
     envVars,
-    mcpServers,
-    mcpEnabled,
     packageStoreStrategy,
     dependencyCloneMode,
     pnpmStorePath,
@@ -227,8 +181,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         setContext(localCtx);
         setEnvVars(localEnv);
         setDefaultCommand(localCmd);
-        setMcpServers(localMcp);
-        setMcpEnabled(localMcpEnabled);
         setPackageStoreStrategy(localPackageStoreStrategy);
         setDependencyCloneMode(localDependencyCloneMode);
         setPnpmStorePath(localPnpmStorePath);
@@ -248,8 +200,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     localCmd,
     localCtx,
     localEnv,
-    localMcp,
-    localMcpEnabled,
     localPackageStoreStrategy,
     localDependencyCloneMode,
     localPnpmStorePath,
@@ -262,8 +212,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     setContext,
     setDefaultCommand,
     setEnvVars,
-    setMcpEnabled,
-    setMcpServers,
     setPackageStoreStrategy,
     setDependencyCloneMode,
     setPnpmStorePath,
@@ -283,8 +231,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     setLocalCmd(validCommand);
     setLocalCtx(context);
     setLocalEnv(envVars);
-    setLocalMcp(mcpServers);
-    setLocalMcpEnabled(mcpEnabled);
     setLocalPackageStoreStrategy(packageStoreStrategy);
     setLocalDependencyCloneMode(dependencyCloneMode);
     setLocalPnpmStorePath(pnpmStorePath);
@@ -300,8 +246,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     setContext(localCtx);
     setEnvVars(localEnv);
     setDefaultCommand(localCmd);
-    setMcpServers(localMcp);
-    setMcpEnabled(localMcpEnabled);
     setPackageStoreStrategy(localPackageStoreStrategy);
     setDependencyCloneMode(localDependencyCloneMode);
     setPnpmStorePath(localPnpmStorePath);
@@ -325,7 +269,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
               <span className="text-[10px] uppercase tracking-[0.18em] text-emerald-300 font-mono">Saved</span>
             )}
           </div>
-          <button onClick={onClose} className="text-[#525252] hover:text-white transition-colors" title="Close settings">
+          <button onClick={onClose} className="btn-ghost btn-icon rounded-md" title="Close settings">
             <X size={18} />
           </button>
         </div>
@@ -357,9 +301,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
               </select>
               <div className="text-[11px] font-mono text-[#9ca3af] break-all">
                 command: <span className="text-[#d4d4d8]">{selectedAgent?.command || localCmd}</span>
-              </div>
-              <div className={`text-[11px] font-mono ${selectedAgentProfile.mcpSupport === 'native' ? 'text-emerald-300' : 'text-amber-300'}`}>
-                MCP: {selectedAgentProfile.mcpSupport === 'native' ? 'supported' : 'not supported'}
               </div>
             </div>
 
@@ -418,7 +359,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             <button
               type="button"
               onClick={() => setShowAdvanced((prev) => !prev)}
-              className="w-full px-4 py-3 text-left flex items-center justify-between bg-[#050505] hover:bg-[#0b0b0b] transition-colors"
+              className="btn-ghost w-full px-4 py-3 text-left flex items-center justify-between rounded-none border-0 border-b border-[var(--panel-border)] bg-[#050505] hover:bg-[#0b0b0b]"
             >
               <span className="text-[11px] uppercase tracking-[0.18em] text-[#9ca3af] font-mono">Advanced</span>
               <span className="text-[11px] text-[#71717a] font-mono">{showAdvanced ? 'hide' : 'show'}</span>
@@ -446,50 +387,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                       Environment format looks valid.
                     </div>
                   )}
-                </div>
-
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <label className="block text-xs text-[#d4d4d8] font-semibold">MCP Configuration</label>
-                    <label className="flex items-center gap-2 text-xs text-[#a3a3a3]">
-                      <input
-                        type="checkbox"
-                        checked={localMcpEnabled}
-                        onChange={(event) => setLocalMcpEnabled(event.target.checked)}
-                        className="appearance-none w-4 h-4 rounded-sm border border-[#262626] bg-[#0a0a0a] checked:bg-white checked:border-white transition-colors"
-                      />
-                      Enabled
-                    </label>
-                  </div>
-                  <p className="text-xs text-[#888888]">
-                    Stored as <span className="font-mono">.agent_cache/mcp.json</span> in each task worktree.
-                  </p>
-                  <textarea
-                    value={localMcp}
-                    onChange={(e) => setLocalMcp(e.target.value)}
-                    placeholder={MCP_EXAMPLE}
-                    className="w-full h-32 input-stealth rounded p-3 text-xs font-mono"
-                  />
-                  <div className="flex items-center justify-between gap-3">
-                    <button
-                      type="button"
-                      className="px-3 py-1.5 text-xs rounded border border-[#2a2a2a] text-[#d4d4d8] hover:border-[#444444] hover:text-white"
-                      onClick={() => setLocalMcp(MCP_EXAMPLE)}
-                    >
-                      Use Example
-                    </button>
-                    {mcpError ? (
-                      <div className="flex items-center gap-2 text-xs text-rose-300">
-                        <AlertCircle size={14} />
-                        {mcpError}
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2 text-xs text-emerald-300">
-                        <CheckCircle2 size={14} />
-                        MCP config looks valid.
-                      </div>
-                    )}
-                  </div>
                 </div>
 
                 <div className="space-y-3">
@@ -547,7 +444,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                         onChange={(event) => setLocalPnpmAutoInstall(event.target.checked)}
                         className="appearance-none w-4 h-4 rounded-sm border border-[#262626] bg-[#0a0a0a] checked:bg-white checked:border-white transition-colors"
                       />
-                      Auto-run pnpm install when creating a worktree
+                      Auto-run dependency hydration when creating a worktree
                     </label>
                   )}
                 </div>
@@ -589,17 +486,17 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         <div className="p-5 border-t border-[#1a1a1a] flex items-center justify-between bg-[#050505]">
-          <button onClick={handleReset} className="px-4 py-2 text-xs font-semibold rounded btn-ghost" disabled={!hasChanges}>
+          <button onClick={handleReset} className="btn-ghost px-4 py-2 text-xs font-semibold rounded" disabled={!hasChanges}>
             Discard Changes
           </button>
           <div className="flex items-center gap-2">
-            <button onClick={onClose} className="px-5 py-2 text-xs font-bold btn-ghost rounded">
+            <button onClick={onClose} className="btn-ghost px-5 py-2 text-xs font-bold rounded">
               Cancel
             </button>
             <button
               onClick={handleSave}
               disabled={!canSave}
-              className="px-5 py-2 btn-primary disabled:opacity-50 disabled:cursor-not-allowed text-xs uppercase tracking-wider font-bold rounded flex items-center shadow-[0_0_15px_rgba(255,255,255,0.1)]"
+              className="btn-primary px-5 py-2 text-xs uppercase tracking-wider font-bold rounded shadow-[0_0_15px_rgba(255,255,255,0.1)]"
             >
               <Save size={14} className="mr-2" /> Save
             </button>

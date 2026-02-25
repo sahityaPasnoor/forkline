@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { buildSubtaskPrompt, sanitizeTaskName } from '../lib/taskUtils';
-import { shellQuote } from '../lib/shell';
+import { buildHandoverPacket } from '../lib/handover';
+import { buildHandoverDispatchPlan, defaultHandoverModeForCommand } from '../lib/handoverAdapters';
 import type {
   AttentionEvent,
   AgentCapabilities,
   AgentInfo,
   AgentTodo,
+  HandoverMode,
+  HandoverResult,
   LivingSpecCandidate,
   LivingSpecPreference,
   LivingSpecSelectionPrompt,
@@ -19,7 +22,7 @@ import type {
 
 type CloseAction = 'merge' | 'delete';
 const SESSION_STORAGE_KEY = 'orchestrator.runtime.session';
-const ATTENTION_FEED_ENABLED = false;
+const ATTENTION_FEED_ENABLED = true;
 const DEFAULT_PROJECT_POLICY: ProjectPermissionPolicy = {
   autonomousMode: false,
   autoApproveMerge: false,
@@ -37,6 +40,8 @@ interface CreateTaskInput {
   prompt: string;
   baseBranch?: string;
   createBaseBranchIfMissing?: boolean;
+  dependencyCloneMode?: 'copy_on_write' | 'full_copy';
+  livingSpecOverridePath?: string;
   capabilities: AgentCapabilities;
   parentTaskId?: string;
   activate?: boolean;
@@ -60,7 +65,58 @@ interface LivingSpecGuardResult {
   error?: string;
 }
 
+interface LivingSpecSummary {
+  preferredLanguage?: string;
+  requiredExts?: string[];
+  forbiddenExts?: string[];
+}
+
 const normalizeProjectPath = (value: string) => value.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+const normalizeRelativeRepoPath = (value: string) => value.trim().replace(/\\/g, '/').replace(/^\.\/+/, '');
+const isAgentsInstructionPath = (value: string) => {
+  const normalized = value.trim().replace(/\\/g, '/').replace(/^\.\/+/, '').toLowerCase();
+  if (!normalized) return false;
+  return normalized.split('/').pop() === 'agents.md';
+};
+const rankLivingSpecCandidate = (candidate: LivingSpecCandidate) => {
+  const normalized = normalizeRelativePath(candidate.path).toLowerCase();
+  if (normalized === 'agents.md') return 0;
+  if (normalized === '.github/agents.md') return 1;
+  return 2;
+};
+const pickPreferredLivingSpecCandidate = (candidates: LivingSpecCandidate[]) => {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  const agentsCandidates = candidates
+    .filter((candidate) => isAgentsInstructionPath(candidate.path))
+    .sort((a, b) => {
+      const rankDiff = rankLivingSpecCandidate(a) - rankLivingSpecCandidate(b);
+      if (rankDiff !== 0) return rankDiff;
+      return normalizeRelativePath(a.path).localeCompare(normalizeRelativePath(b.path));
+    });
+  if (agentsCandidates.length > 0) return agentsCandidates[0];
+  return null;
+};
+const fileExtension = (filePath: string) => {
+  const idx = filePath.lastIndexOf('.');
+  if (idx <= 0) return '';
+  return filePath.slice(idx).toLowerCase();
+};
+
+const HIGH_IMPACT_FILE_PATTERNS = [
+  /^openapi(\.|$)/i,
+  /(^|\/)(openapi|swagger)\.(json|ya?ml)$/i,
+  /(^|\/)(schema|db|database)\.prisma$/i,
+  /(^|\/)package\.json$/i,
+  /(^|\/)pnpm-lock\.yaml$/i,
+  /(^|\/)package-lock\.json$/i,
+  /(^|\/)yarn\.lock$/i,
+  /(^|\/)go\.(mod|work|sum)$/i,
+  /(^|\/)Cargo\.(toml|lock)$/i,
+  /(^|\/)packages\/protocol\//i,
+  /(^|\/)(api|contracts|schema|proto)\//i
+];
+
+const hasHighImpactFile = (files: string[]) => files.some((file) => HIGH_IMPACT_FILE_PATTERNS.some((pattern) => pattern.test(file)));
 
 const toFiniteNumber = (value: unknown): number | undefined => {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -162,8 +218,25 @@ const sanitizeTaskStatusMap = (value: unknown): Record<string, TaskStatus> => {
       isReady: !!status.isReady,
       isDirty: !!status.isDirty,
       hasCollision: !!status.hasCollision,
-      isBlocked: !!status.isBlocked,
-      blockedReason: typeof status.blockedReason === 'string' ? status.blockedReason : undefined
+      // Blocked state is runtime/ephemeral and must come from live PTY events.
+      // Restoring it from persisted session data causes stale "Action Required" banners.
+      isBlocked: false,
+      blockedReason: undefined
+    };
+  }
+  return map;
+};
+
+const toPersistedTaskStatusMap = (value: Record<string, TaskStatus>): Record<string, TaskStatus> => {
+  const map: Record<string, TaskStatus> = {};
+  for (const [taskId, status] of Object.entries(value || {})) {
+    map[taskId] = {
+      isReady: !!status?.isReady,
+      isDirty: !!status?.isDirty,
+      hasCollision: !!status?.hasCollision,
+      // Persist only durable status fields. Blocked state must hydrate from live PTY events.
+      isBlocked: false,
+      blockedReason: undefined
     };
   }
   return map;
@@ -254,6 +327,38 @@ const inferWorktreeName = (worktreePath: string) => {
   return last && last.trim() ? last.trim() : 'restored-worktree';
 };
 
+const MAX_SESSION_DISPLAY_NAME_LENGTH = 72;
+const MAX_SESSION_TAG_LENGTH = 24;
+const MAX_SESSION_TAG_COUNT = 8;
+
+const sanitizeSessionDisplayName = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/\s+/g, ' ').slice(0, MAX_SESSION_DISPLAY_NAME_LENGTH);
+};
+
+const sanitizeSessionTag = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  const compact = value.trim().toLowerCase().replace(/\s+/g, '-');
+  const cleaned = compact.replace(/[^a-z0-9_-]/g, '').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  return cleaned.slice(0, MAX_SESSION_TAG_LENGTH);
+};
+
+const sanitizeSessionTags = (value: unknown) => {
+  const rawValues = Array.isArray(value)
+    ? value
+    : (typeof value === 'string' ? value.split(',') : []);
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const rawValue of rawValues) {
+    const tag = sanitizeSessionTag(rawValue);
+    if (!tag || seen.has(tag)) continue;
+    seen.add(tag);
+    normalized.push(tag);
+    if (normalized.length >= MAX_SESSION_TAG_COUNT) break;
+  }
+  return normalized;
+};
+
 const sanitizeTaskTabs = (value: unknown, basePathFallback: string, defaultCommandFallback: string): TaskTab[] => {
   if (!Array.isArray(value)) return [];
   const tabs: TaskTab[] = [];
@@ -268,6 +373,8 @@ const sanitizeTaskTabs = (value: unknown, basePathFallback: string, defaultComma
     const name = typeof tab.name === 'string' && tab.name.trim()
       ? tab.name.trim()
       : 'restored-task';
+    const displayName = sanitizeSessionDisplayName(tab.displayName);
+    const tags = sanitizeSessionTags(tab.tags);
     const agent = typeof tab.agent === 'string' && tab.agent.trim()
       ? tab.agent.trim()
       : defaultCommandFallback;
@@ -278,11 +385,17 @@ const sanitizeTaskTabs = (value: unknown, basePathFallback: string, defaultComma
     const sanitizedTab: TaskTab = {
       id,
       name,
+      displayName: displayName && displayName !== name ? displayName : undefined,
+      tags: tags.length > 0 ? tags : undefined,
       agent,
       basePath,
       worktreePath: typeof tab.worktreePath === 'string' && tab.worktreePath.trim() ? tab.worktreePath : undefined,
+      parentBranch: typeof tab.parentBranch === 'string' && tab.parentBranch.trim() ? tab.parentBranch.trim() : undefined,
       parentTaskId: typeof tab.parentTaskId === 'string' && tab.parentTaskId.trim() ? tab.parentTaskId : undefined,
       prompt: typeof tab.prompt === 'string' ? tab.prompt : undefined,
+      livingSpecOverridePath: typeof tab.livingSpecOverridePath === 'string' && tab.livingSpecOverridePath.trim()
+        ? normalizeRelativeRepoPath(tab.livingSpecOverridePath)
+        : undefined,
       capabilities: tab.capabilities && typeof tab.capabilities === 'object'
         ? { autoMerge: !!(tab.capabilities as Record<string, unknown>).autoMerge }
         : undefined,
@@ -312,8 +425,6 @@ export const useOrchestrator = () => {
   const [context, setContext] = useState('');
   const [envVars, setEnvVars] = useState('');
   const [defaultCommand, setDefaultCommand] = useState('claude');
-  const [mcpServers, setMcpServers] = useState('');
-  const [mcpEnabled, setMcpEnabled] = useState(true);
   const [packageStoreStrategy, setPackageStoreStrategy] = useState<'off' | 'pnpm_global' | 'polyglot_global'>('off');
   const [dependencyCloneMode, setDependencyCloneMode] = useState<'copy_on_write' | 'full_copy'>('copy_on_write');
   const [pnpmStorePath, setPnpmStorePath] = useState('');
@@ -332,13 +443,33 @@ export const useOrchestrator = () => {
   const [projectPermissions, setProjectPermissions] = useState<Record<string, ProjectPermissionPolicy>>({});
   const [livingSpecPreferences, setLivingSpecPreferences] = useState<Record<string, LivingSpecPreference>>({});
   const [livingSpecCandidatesByProject, setLivingSpecCandidatesByProject] = useState<Record<string, LivingSpecCandidate[]>>({});
+  const [livingSpecSummariesByProject, setLivingSpecSummariesByProject] = useState<Record<string, LivingSpecSummary>>({});
   const [livingSpecSelectionPrompt, setLivingSpecSelectionPrompt] = useState<LivingSpecSelectionPrompt | null>(null);
   const projectPermissionsRef = useRef<Record<string, ProjectPermissionPolicy>>({});
   const livingSpecPreferencesRef = useRef<Record<string, LivingSpecPreference>>({});
+  const livingSpecSummariesRef = useRef<Record<string, LivingSpecSummary>>({});
   const autoPromptLastResponseRef = useRef<Record<string, number>>({});
   const attentionDedupRef = useRef<Record<string, number>>({});
   const fleetSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingApproval = pendingApprovals[0] || null;
+  const refreshLivingSpecSummaryForProject = useCallback(async (projectPath: string) => {
+    const normalizedPath = normalizeProjectPath(projectPath);
+    if (!normalizedPath) return;
+    const preference = livingSpecPreferencesRef.current[normalizedPath];
+    const response = await window.electronAPI.getLivingSpecSummary(normalizedPath, preference);
+    if (!response.success || !response.summary) {
+      setLivingSpecSummariesByProject((prev) => {
+        const next = { ...prev };
+        delete next[normalizedPath];
+        return next;
+      });
+      return;
+    }
+    setLivingSpecSummariesByProject((prev) => ({
+      ...prev,
+      [normalizedPath]: response.summary as LivingSpecSummary
+    }));
+  }, []);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -355,6 +486,16 @@ export const useOrchestrator = () => {
   useEffect(() => {
     livingSpecPreferencesRef.current = livingSpecPreferences;
   }, [livingSpecPreferences]);
+
+  useEffect(() => {
+    livingSpecSummariesRef.current = livingSpecSummariesByProject;
+  }, [livingSpecSummariesByProject]);
+
+  useEffect(() => {
+    const normalizedPath = normalizeProjectPath(basePath);
+    if (!normalizedPath) return;
+    void refreshLivingSpecSummaryForProject(normalizedPath);
+  }, [basePath, livingSpecPreferences, refreshLivingSpecSummaryForProject]);
 
   const validatePath = useCallback(async (path: string) => {
     if (!path) {
@@ -394,6 +535,12 @@ export const useOrchestrator = () => {
   const isLivingSpecPreferenceValid = useCallback((preference: LivingSpecPreference | undefined, candidates: LivingSpecCandidate[]) => {
     if (!preference) return false;
     if (candidates.length === 0) return true;
+    const agentsCandidates = candidates.filter((candidate) => isAgentsInstructionPath(candidate.path));
+    if (agentsCandidates.length > 0) {
+      if (preference.mode !== 'single' || !preference.selectedPath) return false;
+      const normalizedSelection = normalizeRelativePath(preference.selectedPath);
+      return agentsCandidates.some((candidate) => normalizeRelativePath(candidate.path) === normalizedSelection);
+    }
     if (preference.mode === 'consolidated') return true;
     if (!preference.selectedPath) return false;
     const normalizedSelection = normalizeRelativePath(preference.selectedPath);
@@ -404,7 +551,8 @@ export const useOrchestrator = () => {
     const normalizedPath = normalizeProjectPath(projectPath);
     if (!normalizedPath) return;
     setLivingSpecPreferences((prev) => ({ ...prev, [normalizedPath]: preference }));
-  }, []);
+    void refreshLivingSpecSummaryForProject(normalizedPath);
+  }, [refreshLivingSpecSummaryForProject]);
 
   const detectLivingSpecCandidatesForProject = useCallback(async (projectPath: string): Promise<LivingSpecCandidate[]> => {
     const normalizedPath = normalizeProjectPath(projectPath);
@@ -439,6 +587,15 @@ export const useOrchestrator = () => {
       return { success: true };
     }
 
+    const preferredCandidate = pickPreferredLivingSpecCandidate(candidates);
+    if (preferredCandidate) {
+      setProjectLivingSpecPreference(normalizedPath, {
+        mode: 'single',
+        selectedPath: preferredCandidate.path
+      });
+      return { success: true };
+    }
+
     if (candidates.length === 1) {
       setProjectLivingSpecPreference(normalizedPath, {
         mode: 'single',
@@ -450,7 +607,7 @@ export const useOrchestrator = () => {
     setLivingSpecSelectionPrompt({ projectPath: normalizedPath, candidates });
     return {
       success: false,
-      error: 'Choose a Living Spec source file (or consolidate all) before spawning a new task.'
+      error: 'Choose an AGENTS.md instruction file before spawning a new task.'
     };
   }, [detectLivingSpecCandidatesForProject, isLivingSpecPreferenceValid, livingSpecCandidatesByProject, setProjectLivingSpecPreference]);
 
@@ -524,7 +681,8 @@ export const useOrchestrator = () => {
     const now = Date.now();
     const dedupeKey = `${event.kind}::${event.projectPath}::${event.taskId}::${event.reason}`;
     const lastAt = attentionDedupRef.current[dedupeKey] || 0;
-    if (now - lastAt < 1000) return;
+    const dedupeWindowMs = event.kind === 'context_alert' || event.kind === 'spec_deviation' ? 120_000 : 1_500;
+    if (now - lastAt < dedupeWindowMs) return;
     attentionDedupRef.current[dedupeKey] = now;
 
     setAttentionEvents(prev => {
@@ -632,6 +790,8 @@ export const useOrchestrator = () => {
     prompt,
     baseBranch,
     createBaseBranchIfMissing,
+    dependencyCloneMode: taskDependencyCloneMode,
+    livingSpecOverridePath,
     capabilities,
     parentTaskId,
     activate = true
@@ -646,13 +806,16 @@ export const useOrchestrator = () => {
 
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const taskName = sanitizeTaskName(rawTaskName, id);
+    const selectedParentBranch = typeof baseBranch === 'string' && baseBranch.trim() ? baseBranch.trim() : undefined;
     const newTask: TaskTab = {
       id,
       name: taskName,
       agent: agentCommand,
       basePath,
+      parentBranch: selectedParentBranch,
       parentTaskId,
       prompt,
+      livingSpecOverridePath: livingSpecOverridePath ? normalizeRelativeRepoPath(livingSpecOverridePath) : undefined,
       capabilities,
       hasBootstrapped: false
     };
@@ -669,7 +832,7 @@ export const useOrchestrator = () => {
     try {
       const result = await window.electronAPI.createWorktree(basePath, taskName, baseBranch, {
         createBaseBranchIfMissing,
-        dependencyCloneMode,
+        dependencyCloneMode: taskDependencyCloneMode || dependencyCloneMode,
         packageStoreStrategy,
         pnpmStorePath,
         sharedCacheRoot,
@@ -682,6 +845,7 @@ export const useOrchestrator = () => {
           basePath,
           worktreePath: result.worktreePath,
           agent: agentCommand,
+          parentBranch: selectedParentBranch || null,
           parentTaskId: parentTaskId || null
         });
         return { success: true, taskId: id };
@@ -708,17 +872,176 @@ export const useOrchestrator = () => {
     }
   }, []);
 
-  const handoverTask = useCallback((taskId: string, command: string, prompt: string) => {
-    window.electronAPI.writePty(taskId, '\x03');
-    setTimeout(() => {
-      const quotedPrompt = shellQuote(prompt);
-      window.electronAPI.writePty(taskId, `clear && echo "Handover initiated..." && ${command} ${quotedPrompt}\r`);
-    }, 500);
+  const renameTaskSession = useCallback((taskId: string, requestedName: string) => {
+    const requested = sanitizeSessionDisplayName(requestedName);
+    let changed = false;
+    let persistedDisplayName: string | undefined;
 
-    tabsRef.current = tabsRef.current.map(t => (t.id === taskId ? { ...t, agent: command } : t));
+    tabsRef.current = tabsRef.current.map((tab) => {
+      if (tab.id !== taskId) return tab;
+      const fallbackName = sanitizeSessionDisplayName(tab.name);
+      const previousDisplayName = sanitizeSessionDisplayName(tab.displayName);
+      const normalizedPrevious = previousDisplayName && previousDisplayName !== fallbackName ? previousDisplayName : '';
+      const normalizedNext = requested && requested !== fallbackName ? requested : '';
+      if (normalizedNext === normalizedPrevious) return tab;
+      changed = true;
+      persistedDisplayName = normalizedNext || undefined;
+      return {
+        ...tab,
+        displayName: normalizedNext || undefined
+      };
+    });
+
+    if (!changed) return false;
     setTabs(tabsRef.current);
-    void window.electronAPI.fleetRecordEvent(taskId, 'handover', { command, promptLength: prompt.length });
+    void window.electronAPI.fleetRecordEvent(taskId, 'session_renamed', {
+      displayName: persistedDisplayName || null
+    });
+    return true;
   }, []);
+
+  const setTaskTags = useCallback((taskId: string, requestedTags: string[] | string) => {
+    const normalizedNextTags = sanitizeSessionTags(requestedTags);
+    let changed = false;
+
+    tabsRef.current = tabsRef.current.map((tab) => {
+      if (tab.id !== taskId) return tab;
+      const normalizedPreviousTags = sanitizeSessionTags(tab.tags);
+      const isSameLength = normalizedPreviousTags.length === normalizedNextTags.length;
+      const isSameValue = isSameLength && normalizedPreviousTags.every((tag, index) => normalizedNextTags[index] === tag);
+      if (isSameValue) return tab;
+      changed = true;
+      return {
+        ...tab,
+        tags: normalizedNextTags.length > 0 ? normalizedNextTags : undefined
+      };
+    });
+
+    if (!changed) return false;
+    setTabs(tabsRef.current);
+    void window.electronAPI.fleetRecordEvent(taskId, 'session_tags_updated', {
+      tags: normalizedNextTags
+    });
+    return true;
+  }, []);
+
+  const handoverTask = useCallback(async (
+    taskId: string,
+    command: string,
+    prompt: string,
+    modeOverride?: HandoverMode
+  ): Promise<HandoverResult> => {
+    const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+    try {
+      const tab = tabsRef.current.find((item) => item.id === taskId);
+      if (!tab) {
+        return { success: false, error: 'Task not found.' };
+      }
+      if (!tab.worktreePath) {
+        return { success: false, error: 'Task worktree is not ready for handover.' };
+      }
+      const targetCommand = command.trim();
+      if (!targetCommand) {
+        return { success: false, error: 'Target agent command is empty.' };
+      }
+      const operatorInstruction = prompt.trim();
+      if (!operatorInstruction) {
+        return { success: false, error: 'Handover instruction cannot be empty.' };
+      }
+
+      const ensurePtySession = async () => {
+        try {
+          const sessionsResult = await window.electronAPI.listPtySessions();
+          const session = sessionsResult.success
+            ? sessionsResult.sessions?.find((item) => item.taskId === taskId)
+            : undefined;
+          if (!session || !session.running) {
+            window.electronAPI.createPty(taskId, tab.worktreePath);
+            await sleep(450);
+          }
+        } catch {
+          window.electronAPI.createPty(taskId, tab.worktreePath);
+          await sleep(450);
+        }
+      };
+
+      await ensurePtySession();
+      const modifiedResult = await window.electronAPI.getModifiedFiles(tab.worktreePath);
+      const modifiedFiles = modifiedResult.success && Array.isArray(modifiedResult.files)
+        ? modifiedResult.files
+        : [];
+      const packet = buildHandoverPacket({
+        taskId,
+        taskName: tab.name,
+        worktreePath: tab.worktreePath,
+        sourceAgent: tab.agent,
+        targetAgent: targetCommand,
+        parentBranch: tab.parentBranch,
+        currentBranch: tab.name,
+        objective: tab.prompt,
+        operatorInstruction,
+        status: taskStatuses[taskId],
+        todos: taskTodos[taskId] || [],
+        usage: taskUsage[taskId],
+        modifiedFiles
+      });
+      const mode = modeOverride || defaultHandoverModeForCommand(targetCommand);
+
+      const artifactRes = await window.electronAPI.writeHandoverArtifact(tab.worktreePath, packet, targetCommand)
+        .catch(() => ({ success: false as const }));
+      const artifactPath = artifactRes.success ? artifactRes.latestPath : undefined;
+      if (artifactPath) {
+        packet.artifactPath = artifactPath;
+        packet.transferBrief = `${packet.transferBrief} | Artifact=${artifactPath}`;
+      }
+
+      const plan = buildHandoverDispatchPlan(targetCommand, packet.transferBrief, mode);
+      if (mode === 'clean') {
+        const restartResult = await window.electronAPI.restartPty(taskId)
+          .catch((error: any) => ({ success: false, error: error?.message || 'PTY restart failed.' }));
+        if (!restartResult.success) {
+          // Fallback: recover by recreating/interrupting the existing PTY.
+          await ensurePtySession();
+          window.electronAPI.writePty(taskId, '\x03');
+          await sleep(180);
+        }
+      } else if (plan.interruptBeforeLaunch) {
+        window.electronAPI.writePty(taskId, '\x03');
+        await sleep(150);
+      }
+
+      await sleep(plan.launchDelayMs);
+      window.electronAPI.writePty(taskId, `\u0015clear && echo "Handover initiated..." && ${plan.launchCommand}\r`);
+      if (!plan.inlineTransfer) {
+        await sleep(plan.transferDelayMs);
+        const sanitizedTransferLine = plan.transferLine.replace(/[\r\n]+/g, ' ').trim();
+        if (sanitizedTransferLine) {
+          window.electronAPI.writePty(taskId, `${sanitizedTransferLine}\r`);
+        }
+      }
+
+      tabsRef.current = tabsRef.current.map((item) => (
+        item.id === taskId
+          ? { ...item, agent: targetCommand, hasBootstrapped: true }
+          : item
+      ));
+      setTabs(tabsRef.current);
+      void window.electronAPI.fleetRecordEvent(taskId, 'handover', {
+        command: targetCommand,
+        mode,
+        promptLength: operatorInstruction.length,
+        modifiedCount: packet.git.modifiedCount,
+        todoCount: packet.task.todos.length,
+        blocked: packet.task.isBlocked,
+        artifactPath: artifactPath || null,
+        inlineTransfer: plan.inlineTransfer,
+        provider: plan.provider
+      });
+      return { success: true, packet, mode };
+    } catch (error: any) {
+      return { success: false, error: error?.message || 'Handover failed unexpectedly.' };
+    }
+  }, [taskStatuses, taskTodos, taskUsage]);
 
   const splitTask = useCallback(async ({ parentTaskId, objective, count, command }: SplitTaskInput) => {
     const parentTab = tabsRef.current.find(t => t.id === parentTaskId);
@@ -791,28 +1114,68 @@ export const useOrchestrator = () => {
     return restoredTab.id;
   }, [defaultCommand, selectTab, validatePath]);
 
-  const approvePendingRequest = useCallback(async () => {
-    if (!pendingApproval) return;
+  const approveApprovalRequest = useCallback(async (requestId: string) => {
+    const request = pendingApprovals.find((item) => item.requestId === requestId);
+    if (!request) return;
 
-    window.electronAPI.respondToAgent(pendingApproval.requestId, 200, { status: 'approved' });
-    if (pendingApproval.action === 'merge') {
-      const res = await closeTaskById(pendingApproval.taskId, 'merge');
+    window.electronAPI.respondToAgent(request.requestId, 200, { status: 'approved' });
+    if (request.action === 'merge') {
+      const res = await closeTaskById(request.taskId, 'merge');
       if (!res.success) {
         alert(`Failed to merge worktree: ${res.error}`);
       }
     }
-    void window.electronAPI.fleetRecordEvent(pendingApproval.taskId, 'approval_accepted', { action: pendingApproval.action });
-    clearAttentionForTask(pendingApproval.taskId, ['approval_required']);
-    setPendingApprovals(prev => prev.filter(item => item.requestId !== pendingApproval.requestId));
-  }, [pendingApproval, closeTaskById, clearAttentionForTask]);
+    void window.electronAPI.fleetRecordEvent(request.taskId, 'approval_accepted', { action: request.action });
+    clearAttentionForTask(request.taskId, ['approval_required']);
+    setPendingApprovals(prev => prev.filter(item => item.requestId !== request.requestId));
+  }, [pendingApprovals, closeTaskById, clearAttentionForTask]);
+
+  const rejectApprovalRequest = useCallback((requestId: string) => {
+    const request = pendingApprovals.find((item) => item.requestId === requestId);
+    if (!request) return;
+    window.electronAPI.respondToAgent(request.requestId, 403, { error: 'Request denied by user' });
+    void window.electronAPI.fleetRecordEvent(request.taskId, 'approval_rejected', { action: request.action });
+    clearAttentionForTask(request.taskId, ['approval_required']);
+    setPendingApprovals(prev => prev.filter(item => item.requestId !== request.requestId));
+  }, [pendingApprovals, clearAttentionForTask]);
+
+  const approvePendingRequest = useCallback(async () => {
+    if (!pendingApproval) return;
+    await approveApprovalRequest(pendingApproval.requestId);
+  }, [pendingApproval, approveApprovalRequest]);
 
   const rejectPendingRequest = useCallback(() => {
     if (!pendingApproval) return;
-    window.electronAPI.respondToAgent(pendingApproval.requestId, 403, { error: 'Request denied by user' });
-    void window.electronAPI.fleetRecordEvent(pendingApproval.taskId, 'approval_rejected', { action: pendingApproval.action });
-    clearAttentionForTask(pendingApproval.taskId, ['approval_required']);
-    setPendingApprovals(prev => prev.filter(item => item.requestId !== pendingApproval.requestId));
-  }, [pendingApproval, clearAttentionForTask]);
+    rejectApprovalRequest(pendingApproval.requestId);
+  }, [pendingApproval, rejectApprovalRequest]);
+
+  const approveAllPendingRequests = useCallback(async () => {
+    const ids = pendingApprovals.map((item) => item.requestId);
+    for (const requestId of ids) {
+      // eslint-disable-next-line no-await-in-loop
+      await approveApprovalRequest(requestId);
+    }
+  }, [pendingApprovals, approveApprovalRequest]);
+
+  const rejectAllPendingRequests = useCallback(() => {
+    const ids = pendingApprovals.map((item) => item.requestId);
+    ids.forEach((requestId) => rejectApprovalRequest(requestId));
+  }, [pendingApprovals, rejectApprovalRequest]);
+
+  const respondToBlockedTask = useCallback((taskId: string, response: 'y' | 'n') => {
+    window.electronAPI.writePty(taskId, `${response}\r`);
+    void window.electronAPI.fleetRecordEvent(taskId, 'blocked_prompt_response', { response });
+  }, []);
+
+  const respondToAllBlockedTasks = useCallback((response: 'y' | 'n') => {
+    const blockedTaskIds = Object.entries(taskStatuses)
+      .filter(([, status]) => !!status?.isBlocked)
+      .map(([taskId]) => taskId);
+    blockedTaskIds.forEach((taskId) => {
+      window.electronAPI.writePty(taskId, `${response}\r`);
+      void window.electronAPI.fleetRecordEvent(taskId, 'blocked_prompt_response', { response, source: 'bulk' });
+    });
+  }, [taskStatuses]);
 
   useEffect(() => {
     let cancelled = false;
@@ -866,8 +1229,6 @@ export const useOrchestrator = () => {
       if (storeData?.context) setContext(storeData.context);
         // Env vars are intentionally not loaded from persistent disk storage.
       if (storeData?.defaultCommand) setDefaultCommand(storeData.defaultCommand);
-      // MCP server JSON is intentionally not loaded from persistent disk storage.
-      if (typeof storeData?.mcpEnabled === 'boolean') setMcpEnabled(storeData.mcpEnabled);
       if (storeData?.packageStoreStrategy === 'pnpm_global' || storeData?.packageStoreStrategy === 'polyglot_global') {
         setPackageStoreStrategy(storeData.packageStoreStrategy);
       }
@@ -1007,7 +1368,38 @@ export const useOrchestrator = () => {
       setTaskUsage(runtimeTaskUsage);
       setTaskTodos(runtimeTaskTodos);
       setTaskStatuses(runtimeTaskStatuses);
-      setPendingApprovals([]);
+
+      const pendingAgentRequests = await window.electronAPI.listPendingAgentRequests()
+        .catch(() => [] as Array<{ requestId: string; taskId: string; action: string; payload: any }>);
+      if (cancelled) return;
+      const hydratedPendingApprovals: PendingApprovalQueueItem[] = (Array.isArray(pendingAgentRequests) ? pendingAgentRequests : [])
+        .map((req) => {
+          const tab = finalTabs.find((item) => item.id === req.taskId);
+          return {
+            requestId: req.requestId,
+            taskId: req.taskId,
+            action: req.action,
+            payload: req.payload,
+            projectPath: tab?.basePath || resolvedBasePath
+          };
+        });
+      setPendingApprovals((prev) => {
+        const nextById = new Map<string, PendingApprovalQueueItem>();
+        prev.forEach((item) => nextById.set(item.requestId, item));
+        hydratedPendingApprovals.forEach((item) => nextById.set(item.requestId, item));
+        return Array.from(nextById.values());
+      });
+      hydratedPendingApprovals.forEach((item) => {
+        const tab = finalTabs.find((entry) => entry.id === item.taskId);
+        pushAttentionEvent({
+          kind: 'approval_required',
+          projectPath: item.projectPath,
+          taskId: item.taskId,
+          taskName: tab?.name || item.taskId,
+          reason: `Approval required for ${item.action}`,
+          requiresAction: true
+        });
+      });
 
       if (!cancelled) setIsLoaded(true);
       await detectAgentsPromise;
@@ -1035,6 +1427,16 @@ export const useOrchestrator = () => {
 
       const currentPreference = livingSpecPreferencesRef.current[normalizedProjectPath];
       if (isLivingSpecPreferenceValid(currentPreference, candidates)) {
+        setLivingSpecSelectionPrompt((prev) => (prev?.projectPath === normalizedProjectPath ? null : prev));
+        return;
+      }
+
+      const preferredCandidate = pickPreferredLivingSpecCandidate(candidates);
+      if (preferredCandidate) {
+        setProjectLivingSpecPreference(normalizedProjectPath, {
+          mode: 'single',
+          selectedPath: preferredCandidate.path
+        });
         setLivingSpecSelectionPrompt((prev) => (prev?.projectPath === normalizedProjectPath ? null : prev));
         return;
       }
@@ -1074,7 +1476,6 @@ export const useOrchestrator = () => {
       basePath,
       context,
       defaultCommand,
-      mcpEnabled,
       packageStoreStrategy,
       dependencyCloneMode,
       pnpmStorePath,
@@ -1090,7 +1491,6 @@ export const useOrchestrator = () => {
     basePath,
     context,
     defaultCommand,
-    mcpEnabled,
     packageStoreStrategy,
     dependencyCloneMode,
     pnpmStorePath,
@@ -1105,11 +1505,23 @@ export const useOrchestrator = () => {
   useEffect(() => {
     if (!isLoaded) return;
     // Session state is persisted to survive renderer refreshes and full app restarts.
-    void window.electronAPI.saveRuntimeSession({ basePath, tabs, activeTab, activeTabByProject, taskUsage, taskTodos, taskStatuses });
+    const persistedTaskStatuses = toPersistedTaskStatusMap(taskStatuses);
+    void window.electronAPI.saveRuntimeSession({
+      basePath,
+      tabs,
+      activeTab,
+      activeTabByProject,
+      taskUsage,
+      taskTodos,
+      taskStatuses: persistedTaskStatuses
+    });
 
     if (typeof window !== 'undefined') {
       try {
-        window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ basePath, tabs, activeTab, activeTabByProject, taskUsage, taskTodos, taskStatuses }));
+        window.sessionStorage.setItem(
+          SESSION_STORAGE_KEY,
+          JSON.stringify({ basePath, tabs, activeTab, activeTabByProject, taskUsage, taskTodos, taskStatuses: persistedTaskStatuses })
+        );
       } catch {
         // Ignore session storage write failures.
       }
@@ -1284,11 +1696,23 @@ export const useOrchestrator = () => {
 
     const unsubAgentMessage = window.electronAPI.onAgentMessage((req) => {
       applyUsagePayload(req.taskId, req.payload);
+      const message = typeof req.payload === 'string'
+        ? req.payload.slice(0, 800)
+        : (req.payload && typeof req.payload === 'object'
+          ? JSON.stringify(req.payload).slice(0, 1200)
+          : '');
+      void window.electronAPI.fleetRecordEvent(req.taskId, 'agent_message', {
+        hasMessage: !!message,
+        message
+      });
     });
     unsubscribers.push(unsubAgentMessage);
 
     const unsubAgentUsage = window.electronAPI.onAgentUsage((req) => {
       applyUsagePayload(req.taskId, req.payload);
+      void window.electronAPI.fleetRecordEvent(req.taskId, 'agent_usage_reported', {
+        payload: req.payload && typeof req.payload === 'object' ? req.payload : null
+      });
     });
     unsubscribers.push(unsubAgentUsage);
 
@@ -1314,15 +1738,7 @@ export const useOrchestrator = () => {
           return;
         }
 
-        const normalizedCurrentProject = normalizeProjectPath(basePath);
-        const activeTabs = currentTabs.filter((tab) => {
-          if (!tab.worktreePath) return false;
-          if (!normalizedCurrentProject) return true;
-          return normalizeProjectPath(tab.basePath) === normalizedCurrentProject;
-        });
-        const tabsToEvaluate = activeTabs.length > 0
-          ? activeTabs
-          : currentTabs.filter(tab => !!tab.worktreePath);
+        const tabsToEvaluate = currentTabs.filter(tab => !!tab.worktreePath);
         const modifiedFilesMap: Record<string, string[]> = {};
         const readinessMap: Record<string, boolean> = {};
         const results = await Promise.all(
@@ -1350,6 +1766,7 @@ export const useOrchestrator = () => {
         const collidingFiles: string[] = [];
         const newCollisionState: Record<string, boolean> = {};
         const newDirtyState: Record<string, boolean> = {};
+        const tabById = new Map(currentTabs.map((tab) => [tab.id, tab]));
 
         for (const [file, tabIds] of allFiles.entries()) {
           if (tabIds.length > 1) {
@@ -1362,6 +1779,68 @@ export const useOrchestrator = () => {
 
         for (const tabId of Object.keys(modifiedFilesMap)) {
           newDirtyState[tabId] = modifiedFilesMap[tabId].length > 0;
+        }
+
+        // Cross-worktree context leakage: high-impact changes in one task can break siblings.
+        for (const [sourceTaskId, files] of Object.entries(modifiedFilesMap)) {
+          if (!hasHighImpactFile(files)) continue;
+          const sourceTab = tabById.get(sourceTaskId);
+          if (!sourceTab) continue;
+          const sourceProject = normalizeProjectPath(sourceTab.basePath);
+          const impactFile = files.find((file) => HIGH_IMPACT_FILE_PATTERNS.some((pattern) => pattern.test(file))) || files[0];
+
+          for (const tab of currentTabs) {
+            if (tab.id === sourceTaskId) continue;
+            if (normalizeProjectPath(tab.basePath) !== sourceProject) continue;
+            if (!tab.worktreePath) continue;
+            pushAttentionEvent({
+              kind: 'context_alert',
+              projectPath: tab.basePath,
+              taskId: tab.id,
+              taskName: tab.name,
+              reason: `Shared context updated by ${sourceTab.name}: ${impactFile}`,
+              requiresAction: false
+            });
+          }
+        }
+
+        // Spec-driven orchestration: flag likely drifts from selected Living Spec.
+        for (const [taskId, files] of Object.entries(modifiedFilesMap)) {
+          if (files.length === 0) continue;
+          const tab = tabById.get(taskId);
+          if (!tab) continue;
+          const summary = livingSpecSummariesRef.current[normalizeProjectPath(tab.basePath)];
+          if (!summary) continue;
+
+          const forbidden = new Set((summary.forbiddenExts || []).map((ext) => ext.toLowerCase()));
+          const required = new Set((summary.requiredExts || []).map((ext) => ext.toLowerCase()));
+          const changedExts = new Set(files.map((file) => fileExtension(file)).filter(Boolean));
+          const violatingExt = Array.from(changedExts).find((ext) => forbidden.has(ext));
+          if (violatingExt) {
+            pushAttentionEvent({
+              kind: 'spec_deviation',
+              projectPath: tab.basePath,
+              taskId: tab.id,
+              taskName: tab.name,
+              reason: `Spec expects ${summary.preferredLanguage || 'configured stack'} but task changed ${violatingExt} files.`,
+              requiresAction: true
+            });
+            continue;
+          }
+          if (required.size > 0) {
+            const touchedRequired = Array.from(changedExts).some((ext) => required.has(ext));
+            const touchedCode = Array.from(changedExts).some((ext) => ['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs'].includes(ext));
+            if (touchedCode && !touchedRequired) {
+              pushAttentionEvent({
+                kind: 'spec_deviation',
+                projectPath: tab.basePath,
+                taskId: tab.id,
+                taskName: tab.name,
+                reason: `Spec favors ${summary.preferredLanguage || 'the selected spec'}, but recent edits target a different language set.`,
+                requiresAction: true
+              });
+            }
+          }
         }
 
         setCollisions(collidingFiles);
@@ -1392,7 +1871,16 @@ export const useOrchestrator = () => {
       cancelled = true;
       clearInterval(intervalId);
     };
-  }, [basePath]);
+  }, [pushAttentionEvent]);
+
+  const blockedTasks = tabs
+    .filter((tab) => !!taskStatuses[tab.id]?.isBlocked)
+    .map((tab) => ({
+      taskId: tab.id,
+      taskName: tab.name,
+      projectPath: tab.basePath,
+      reason: taskStatuses[tab.id]?.blockedReason || 'Agent is waiting for confirmation.'
+    }));
 
   return {
     state: {
@@ -1404,8 +1892,6 @@ export const useOrchestrator = () => {
       context,
       envVars,
       defaultCommand,
-      mcpServers,
-      mcpEnabled,
       packageStoreStrategy,
       dependencyCloneMode,
       pnpmStorePath,
@@ -1419,11 +1905,15 @@ export const useOrchestrator = () => {
       taskUsage,
       collisions,
       pendingApproval,
+      pendingApprovals,
       pendingApprovalCount: pendingApprovals.length,
+      blockedTasks,
+      approvalInboxCount: pendingApprovals.length + blockedTasks.length,
       attentionEvents,
       projectPermissions,
       livingSpecPreferences,
       livingSpecCandidatesByProject,
+      livingSpecSummariesByProject,
       livingSpecSelectionPrompt,
       activeTabByProject
     },
@@ -1435,8 +1925,6 @@ export const useOrchestrator = () => {
       setContext,
       setEnvVars,
       setDefaultCommand,
-      setMcpServers,
-      setMcpEnabled,
       setPackageStoreStrategy,
       setDependencyCloneMode,
       setPnpmStorePath,
@@ -1450,11 +1938,19 @@ export const useOrchestrator = () => {
       dismissAttentionEvent,
       clearAttentionEvents,
       createTask,
+      renameTaskSession,
+      setTaskTags,
       markTaskBootstrapped,
       closeTaskById,
       handoverTask,
       splitTask,
       restoreExistingWorktree,
+      approveApprovalRequest,
+      rejectApprovalRequest,
+      approveAllPendingRequests,
+      rejectAllPendingRequests,
+      respondToBlockedTask,
+      respondToAllBlockedTasks,
       approvePendingRequest,
       rejectPendingRequest,
       validatePath

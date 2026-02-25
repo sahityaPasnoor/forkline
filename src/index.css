@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 :root {
+  color-scheme: dark;
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   --bg: #000000;
@@ -135,87 +136,90 @@ html[data-theme="sunset-dark"] {
 }
 
 html[data-theme="paper-light"] {
+  color-scheme: light;
   --bg: #f6f7f9;
-  --fg: #111827;
+  --fg: #0f172a;
   --panel: #ffffff;
-  --panel-border: #d5dbe4;
-  --btn-ghost-bg-hover: #eef2f8;
-  --btn-ghost-border-hover: #c8d2df;
-  --btn-ghost-fg: #374151;
-  --btn-ghost-fg-hover: #111827;
+  --panel-border: #8ea0b8;
+  --btn-ghost-bg-hover: #e8eef6;
+  --btn-ghost-border-hover: #7a8ca6;
+  --btn-ghost-fg: #162033;
+  --btn-ghost-fg-hover: #0f172a;
   --btn-primary-bg: #111827;
   --btn-primary-fg: #f9fafb;
   --btn-primary-bg-hover: #1f2937;
   --input-bg: #f9fafb;
   --input-bg-focus: #ffffff;
-  --input-border: #cbd5e1;
-  --input-border-focus: #64748b;
+  --input-border: #8597af;
+  --input-border-focus: #475569;
   --xterm-bg: #ffffff;
-  --xterm-fg: #111827;
-  --xterm-cursor: #111827;
+  --xterm-fg: #0f172a;
+  --xterm-cursor: #0f172a;
   --xterm-selection: rgba(31, 41, 55, 0.2);
-  --panel-subtle: #eef2f8;
+  --panel-subtle: #edf2f8;
   --panel-strong: #f9fafb;
-  --text-primary: #111827;
-  --text-secondary: #374151;
-  --text-tertiary: #4b5563;
-  --text-muted: #64748b;
+  --text-primary: #0f172a;
+  --text-secondary: #162033;
+  --text-tertiary: #25364a;
+  --text-muted: #32465c;
 }
 
 html[data-theme="sandstorm-light"] {
+  color-scheme: light;
   --bg: #f7f3ea;
-  --fg: #2b2217;
+  --fg: #231b12;
   --panel: #fffaf0;
-  --panel-border: #d9c9ae;
-  --btn-ghost-bg-hover: #f3ead9;
-  --btn-ghost-border-hover: #d7bc92;
-  --btn-ghost-fg: #55432c;
-  --btn-ghost-fg-hover: #2b2217;
+  --panel-border: #9f7b4f;
+  --btn-ghost-bg-hover: #f1e4cf;
+  --btn-ghost-border-hover: #926536;
+  --btn-ghost-fg: #352211;
+  --btn-ghost-fg-hover: #231b12;
   --btn-primary-bg: #7f4f24;
   --btn-primary-fg: #fff6ea;
   --btn-primary-bg-hover: #6d431f;
   --input-bg: #fff8ec;
   --input-bg-focus: #fffdf8;
-  --input-border: #d8c09d;
-  --input-border-focus: #ae8a5a;
+  --input-border: #9b7645;
+  --input-border-focus: #8d6536;
   --xterm-bg: #fff8ed;
-  --xterm-fg: #2b2217;
+  --xterm-fg: #231b12;
   --xterm-cursor: #5f3c1d;
   --xterm-selection: rgba(127, 79, 36, 0.2);
-  --panel-subtle: #f3ead9;
+  --panel-subtle: #f1e6d5;
   --panel-strong: #fff8ec;
-  --text-primary: #2b2217;
-  --text-secondary: #55432c;
-  --text-tertiary: #6b5439;
-  --text-muted: #8a6f4d;
+  --text-primary: #231b12;
+  --text-secondary: #352211;
+  --text-tertiary: #412d18;
+  --text-muted: #52391f;
 }
 
 html[data-theme="ice-light"] {
+  color-scheme: light;
   --bg: #eef4f9;
-  --fg: #10263d;
+  --fg: #0f2740;
   --panel: #f9fcff;
-  --panel-border: #bfd2e6;
-  --btn-ghost-bg-hover: #e4eef8;
-  --btn-ghost-border-hover: #acc5de;
-  --btn-ghost-fg: #2e4c68;
-  --btn-ghost-fg-hover: #10263d;
+  --panel-border: #789bbc;
+  --btn-ghost-bg-hover: #ddeaf7;
+  --btn-ghost-border-hover: #5e86b1;
+  --btn-ghost-fg: #163a5d;
+  --btn-ghost-fg-hover: #0f2740;
   --btn-primary-bg: #1f5f8b;
   --btn-primary-fg: #f8fcff;
   --btn-primary-bg-hover: #184d72;
   --input-bg: #f4f9ff;
   --input-bg-focus: #ffffff;
-  --input-border: #b8cee5;
-  --input-border-focus: #5f89b1;
+  --input-border: #6f98c0;
+  --input-border-focus: #34628b;
   --xterm-bg: #f4faff;
-  --xterm-fg: #10263d;
+  --xterm-fg: #0f2740;
   --xterm-cursor: #1f5f8b;
   --xterm-selection: rgba(31, 95, 139, 0.2);
-  --panel-subtle: #e4eef8;
+  --panel-subtle: #e1ecf7;
   --panel-strong: #f4f9ff;
-  --text-primary: #10263d;
-  --text-secondary: #2e4c68;
-  --text-tertiary: #3d6284;
-  --text-muted: #5f89b1;
+  --text-primary: #0f2740;
+  --text-secondary: #163a5d;
+  --text-tertiary: #1a466f;
+  --text-muted: #1f507b;
 }
 
 @layer base {
@@ -234,6 +238,16 @@ html[data-theme="ice-light"] {
   pre,
   .font-mono {
     font-family: var(--font-mono);
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  [role="button"]:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid var(--input-border-focus);
+    outline-offset: 2px;
   }
 }
 
@@ -262,14 +276,59 @@ html[data-theme="ice-light"] {
   border: 1px solid var(--panel-border);
 }
 
-.btn-ghost {
-  background-color: transparent;
+.btn,
+.btn-ghost,
+.btn-primary,
+.btn-success,
+.btn-info,
+.btn-warning,
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  border-radius: 0.5rem;
   border: 1px solid transparent;
-  color: var(--btn-ghost-fg);
-  transition: all 0.15s ease;
+  line-height: 1.1;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease,
+    opacity 0.15s ease,
+    transform 0.15s ease;
 }
 
-.btn-ghost:hover {
+.btn:active,
+.btn-ghost:active,
+.btn-primary:active,
+.btn-success:active,
+.btn-info:active,
+.btn-warning:active,
+.btn-danger:active {
+  transform: translateY(0.5px);
+}
+
+.btn:disabled,
+.btn-ghost:disabled,
+.btn-primary:disabled,
+.btn-success:disabled,
+.btn-info:disabled,
+.btn-warning:disabled,
+.btn-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
+.btn-ghost {
+  background-color: color-mix(in srgb, var(--panel-subtle) 74%, transparent);
+  border-color: var(--panel-border);
+  color: var(--btn-ghost-fg);
+}
+
+.btn-ghost:hover:not(:disabled) {
   background-color: var(--btn-ghost-bg-hover);
   border-color: var(--btn-ghost-border-hover);
   color: var(--btn-ghost-fg-hover);
@@ -277,14 +336,233 @@ html[data-theme="ice-light"] {
 
 .btn-primary {
   background-color: var(--btn-primary-bg);
+  border-color: color-mix(in srgb, var(--btn-primary-bg) 56%, var(--panel-border));
   color: var(--btn-primary-fg);
   font-weight: 600;
-  transition: all 0.15s ease;
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
   background-color: var(--btn-primary-bg-hover);
   box-shadow: 0 0 10px rgba(255,255,255,0.2);
+}
+
+.btn-success {
+  background: color-mix(in srgb, #166534 42%, var(--panel));
+  border-color: color-mix(in srgb, #22c55e 52%, var(--panel-border));
+  color: #dcfce7;
+  font-weight: 600;
+}
+
+.btn-success:hover:not(:disabled) {
+  background: color-mix(in srgb, #15803d 52%, var(--panel));
+  border-color: color-mix(in srgb, #4ade80 58%, var(--btn-ghost-border-hover));
+  color: #f0fdf4;
+}
+
+.btn-info {
+  background: color-mix(in srgb, #0e7490 26%, var(--panel));
+  border-color: color-mix(in srgb, #38bdf8 48%, var(--panel-border));
+  color: #bae6fd;
+  font-weight: 600;
+}
+
+.btn-info:hover:not(:disabled) {
+  background: color-mix(in srgb, #0891b2 38%, var(--panel));
+  border-color: color-mix(in srgb, #67e8f9 54%, var(--btn-ghost-border-hover));
+  color: #cffafe;
+}
+
+.btn-warning {
+  background: color-mix(in srgb, #92400e 32%, var(--panel));
+  border-color: color-mix(in srgb, #f59e0b 54%, var(--panel-border));
+  color: #fcd34d;
+  font-weight: 600;
+}
+
+.btn-warning:hover:not(:disabled) {
+  background: color-mix(in srgb, #b45309 44%, var(--panel));
+  border-color: color-mix(in srgb, #fbbf24 58%, var(--btn-ghost-border-hover));
+  color: #fde68a;
+}
+
+.btn-danger {
+  background: color-mix(in srgb, #7f1d1d 30%, var(--panel));
+  border-color: color-mix(in srgb, #ef4444 54%, var(--panel-border));
+  color: #fecaca;
+  font-weight: 600;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, #991b1b 42%, var(--panel));
+  border-color: color-mix(in srgb, #f87171 56%, var(--btn-ghost-border-hover));
+  color: #fee2e2;
+}
+
+.btn-link {
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  transition: color 0.15s ease, text-decoration-color 0.15s ease;
+  text-underline-offset: 2px;
+}
+
+.btn-link:hover {
+  color: var(--btn-ghost-fg-hover);
+  text-decoration: underline;
+}
+
+.btn-icon {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+}
+
+.btn-icon-sm {
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+}
+
+.terminal-action-bar {
+  padding: 0.65rem 0.75rem 0.75rem;
+  border-top: 1px solid var(--panel-border);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 92%, transparent), var(--panel-subtle));
+  gap: 0.5rem;
+}
+
+.terminal-action-notice {
+  border: 1px solid var(--panel-border);
+  background: color-mix(in srgb, var(--panel-subtle) 86%, transparent);
+  color: var(--text-secondary);
+  border-radius: 0.45rem;
+  padding: 0.4rem 0.55rem;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.terminal-blocked-banner {
+  border: 1px solid color-mix(in srgb, #7f1d1d 72%, var(--panel-border));
+  background: color-mix(in srgb, #1a0505 82%, var(--panel));
+  border-radius: 0.55rem;
+  padding: 0.5rem 0.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.terminal-action-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.terminal-action-chips {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.terminal-action-chip {
+  font-size: 10px;
+  border: 1px solid var(--panel-border);
+  background: color-mix(in srgb, var(--panel-subtle) 88%, transparent);
+  color: var(--text-secondary);
+  padding: 0.2rem 0.45rem;
+  border-radius: 0.35rem;
+  font-family: var(--font-mono);
+  line-height: 1.25;
+}
+
+.terminal-action-updated {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.terminal-quick-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.terminal-quick-group {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.terminal-quick-group--right {
+  margin-left: auto;
+}
+
+.terminal-quick-btn {
+  border: 1px solid var(--panel-border);
+  background: color-mix(in srgb, var(--panel-subtle) 90%, transparent);
+  color: var(--text-secondary);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.16s ease;
+}
+
+.terminal-quick-btn:hover {
+  border-color: var(--btn-ghost-border-hover);
+  color: var(--btn-ghost-fg-hover);
+  background: var(--btn-ghost-bg-hover);
+}
+
+.terminal-quick-btn--primary {
+  border-color: color-mix(in srgb, #1d4ed8 30%, var(--panel-border));
+  color: color-mix(in srgb, #93c5fd 80%, var(--text-secondary));
+}
+
+.terminal-quick-btn--primary:hover {
+  border-color: color-mix(in srgb, #2563eb 58%, var(--btn-ghost-border-hover));
+  color: #dbeafe;
+}
+
+.terminal-quick-btn--merge {
+  border-color: color-mix(in srgb, #16a34a 28%, var(--panel-border));
+  color: color-mix(in srgb, #86efac 82%, var(--text-secondary));
+}
+
+.terminal-quick-btn--merge:hover {
+  border-color: color-mix(in srgb, #22c55e 56%, var(--btn-ghost-border-hover));
+  color: #dcfce7;
+}
+
+.terminal-quick-btn--delete {
+  border-color: color-mix(in srgb, #dc2626 28%, var(--panel-border));
+  color: color-mix(in srgb, #fca5a5 82%, var(--text-secondary));
+}
+
+.terminal-quick-btn--delete:hover {
+  border-color: color-mix(in srgb, #ef4444 56%, var(--btn-ghost-border-hover));
+  color: #fee2e2;
+}
+
+@media (max-width: 860px) {
+  .terminal-action-updated {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .terminal-quick-group--right {
+    margin-left: 0;
+  }
 }
 
 .input-stealth {
@@ -320,6 +598,312 @@ html[data-theme="ice-light"] {
   background-image: linear-gradient(90deg, #ffffff, #888888);
 }
 
+/* Flight Deck visuals */
+@keyframes fdGridPan {
+  0% { transform: translate3d(0, 0, 0); }
+  100% { transform: translate3d(0, 28px, 0); }
+}
+
+@keyframes fdGlowDrift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); opacity: 0.36; }
+  50% { transform: translate3d(12px, -8px, 0) scale(1.08); opacity: 0.56; }
+}
+
+@keyframes fdRadarSweep {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes fdCardIn {
+  0% { transform: translateY(8px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes fdShimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes fdPulse {
+  0%, 100% { opacity: 0.86; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.04); }
+}
+
+@keyframes fdSignal {
+  0% { opacity: 0.4; filter: saturate(0.85); }
+  100% { opacity: 1; filter: saturate(1.15); }
+}
+
+@keyframes fdTagFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1px); }
+}
+
+.flight-deck-stage {
+  backdrop-filter: blur(2px);
+}
+
+.flight-deck-shell {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background:
+    radial-gradient(120% 80% at 4% 4%, color-mix(in srgb, #22d3ee 16%, transparent), transparent 56%),
+    radial-gradient(90% 90% at 100% 0%, color-mix(in srgb, #2563eb 14%, transparent), transparent 54%),
+    var(--panel);
+}
+
+.flight-deck-backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.flight-deck-grid {
+  position: absolute;
+  inset: -18%;
+  opacity: 0.13;
+  background-image:
+    repeating-linear-gradient(0deg, color-mix(in srgb, #22d3ee 48%, transparent) 0px, color-mix(in srgb, #22d3ee 48%, transparent) 1px, transparent 1px, transparent 28px),
+    repeating-linear-gradient(90deg, color-mix(in srgb, #38bdf8 40%, transparent) 0px, color-mix(in srgb, #38bdf8 40%, transparent) 1px, transparent 1px, transparent 28px);
+  mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 0.9), transparent 78%);
+  animation: fdGridPan 16s linear infinite;
+}
+
+.flight-deck-glow {
+  position: absolute;
+  width: 22rem;
+  height: 22rem;
+  border-radius: 999px;
+  filter: blur(64px);
+  animation: fdGlowDrift 7.8s ease-in-out infinite;
+}
+
+.flight-deck-glow--one {
+  top: -7rem;
+  left: -6rem;
+  background: color-mix(in srgb, #22d3ee 34%, transparent);
+}
+
+.flight-deck-glow--two {
+  right: -8rem;
+  top: -8rem;
+  background: color-mix(in srgb, #2563eb 28%, transparent);
+  animation-delay: 1.4s;
+}
+
+.flight-deck-radar {
+  position: absolute;
+  top: 1.2rem;
+  right: 1.2rem;
+  width: 7rem;
+  height: 7rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #38bdf8 36%, var(--panel-border));
+  background: radial-gradient(circle at center, color-mix(in srgb, #164e63 24%, transparent), transparent 72%);
+  opacity: 0.56;
+}
+
+.flight-deck-radar-ring {
+  position: absolute;
+  inset: 0.85rem;
+  border: 1px solid color-mix(in srgb, #38bdf8 40%, transparent);
+  border-radius: 999px;
+}
+
+.flight-deck-radar-ring--inner {
+  inset: 1.7rem;
+  opacity: 0.72;
+}
+
+.flight-deck-radar-sweep {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 3.5rem;
+  height: 1px;
+  transform-origin: 0 0;
+  background: linear-gradient(90deg, color-mix(in srgb, #67e8f9 70%, transparent), transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, #22d3ee 60%, transparent);
+  animation: fdRadarSweep 4.6s linear infinite;
+}
+
+.flight-deck-stat {
+  position: relative;
+  overflow: hidden;
+  backdrop-filter: blur(1px);
+}
+
+.flight-deck-stat::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 35%, color-mix(in srgb, #ffffff 10%, transparent), transparent 64%);
+  transform: translateX(-100%);
+  animation: fdShimmer 6.8s linear infinite;
+}
+
+.flight-deck-stat--thinking {
+  border-color: color-mix(in srgb, #0891b2 58%, var(--panel-border));
+  background: color-mix(in srgb, #0c4a6e 22%, var(--panel));
+}
+
+.flight-deck-stat--blocked {
+  border-color: color-mix(in srgb, #b91c1c 60%, var(--panel-border));
+  background: color-mix(in srgb, #7f1d1d 24%, var(--panel));
+}
+
+.flight-deck-stat--idle {
+  border-color: color-mix(in srgb, #334155 56%, var(--panel-border));
+  background: color-mix(in srgb, #1f2937 24%, var(--panel));
+}
+
+.flight-deck-stat--done {
+  border-color: color-mix(in srgb, #15803d 62%, var(--panel-border));
+  background: color-mix(in srgb, #14532d 26%, var(--panel));
+}
+
+.flight-deck-stat-value {
+  animation: fdPulse 3s ease-in-out infinite;
+}
+
+.flight-deck-card {
+  position: relative;
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--panel-border) 88%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 82%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 6%, transparent);
+  opacity: 0;
+  transform: translateY(8px);
+  animation: fdCardIn 0.38s ease forwards;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.flight-deck-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(130deg, transparent 18%, color-mix(in srgb, #ffffff 6%, transparent) 49%, transparent 80%);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.flight-deck-card:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--input-border-focus) 58%, var(--panel-border));
+  box-shadow:
+    0 10px 24px color-mix(in srgb, #000000 42%, transparent),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 8%, transparent);
+}
+
+.flight-deck-card:hover::before {
+  opacity: 1;
+}
+
+.flight-deck-card--active {
+  border-color: color-mix(in srgb, var(--input-border-focus) 88%, var(--panel-border));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, #22d3ee 24%, transparent),
+    0 10px 20px color-mix(in srgb, #0891b2 18%, transparent);
+}
+
+.flight-deck-state-dot {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.flight-deck-state-dot--thinking {
+  background: #22d3ee;
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.75);
+  animation: fdPulse 1.6s ease-in-out infinite;
+}
+
+.flight-deck-state-dot--blocked {
+  background: #f87171;
+  box-shadow: 0 0 8px rgba(248, 113, 113, 0.72);
+  animation: fdPulse 0.95s ease-in-out infinite;
+}
+
+.flight-deck-state-dot--done {
+  background: #4ade80;
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.68);
+}
+
+.flight-deck-state-dot--idle {
+  background: #9ca3af;
+}
+
+.flight-deck-tag {
+  animation: fdTagFloat 2.8s ease-in-out infinite;
+}
+
+.flight-deck-telemetry {
+  border: 1px solid color-mix(in srgb, var(--panel-border) 86%, transparent);
+  background: color-mix(in srgb, var(--panel-subtle) 88%, transparent);
+  border-radius: 0.45rem;
+  padding: 0.38rem 0.5rem;
+  display: grid;
+  gap: 0.28rem;
+}
+
+.flight-deck-telemetry-row {
+  display: grid;
+  grid-template-columns: 58px 1fr 40px;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.flight-deck-telemetry-label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 9px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.flight-deck-telemetry-track {
+  height: 0.33rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--panel-border) 88%, transparent);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  overflow: hidden;
+}
+
+.flight-deck-telemetry-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #1d4ed8, #22d3ee);
+  animation: fdSignal 0.4s ease both;
+  transition: width 0.25s ease;
+}
+
+.flight-deck-telemetry-value {
+  text-align: right;
+  font-size: 9px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flight-deck-grid,
+  .flight-deck-glow,
+  .flight-deck-radar-sweep,
+  .flight-deck-stat::after,
+  .flight-deck-stat-value,
+  .flight-deck-card,
+  .flight-deck-state-dot--thinking,
+  .flight-deck-state-dot--blocked,
+  .flight-deck-tag,
+  .flight-deck-telemetry-fill {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
 /* Compatibility layer: map older hard-coded utility colors to theme variables */
 html[data-theme] .bg-\[\#000000\] { background-color: var(--bg) !important; }
 html[data-theme] .bg-\[\#050505\] { background-color: var(--panel) !important; }
@@ -327,28 +911,61 @@ html[data-theme] .bg-\[\#070707\],
 html[data-theme] .bg-\[\#090909\],
 html[data-theme] .bg-\[\#0a0a0a\],
 html[data-theme] .bg-\[\#0c0c0c\],
+html[data-theme] .bg-\[\#0b0b0b\],
+html[data-theme] .bg-\[\#0f0f10\],
+html[data-theme] .bg-\[\#101010\],
+html[data-theme] .bg-\[\#101012\],
 html[data-theme] .bg-\[\#111111\] { background-color: var(--panel-subtle) !important; }
 html[data-theme] .bg-\[\#121212\],
 html[data-theme] .bg-\[\#161616\] { background-color: var(--panel-strong) !important; }
+html[data-theme] .hover\:bg-\[\#050505\]:hover,
+html[data-theme] .hover\:bg-\[\#0a0a0a\]:hover,
+html[data-theme] .hover\:bg-\[\#0b0b0b\]:hover,
+html[data-theme] .hover\:bg-\[\#0f0f10\]:hover,
+html[data-theme] .hover\:bg-\[\#101010\]:hover,
+html[data-theme] .hover\:bg-\[\#1f1f1f\]:hover,
+html[data-theme] .active\:bg-\[\#2d2d2d\]:active { background-color: var(--btn-ghost-bg-hover) !important; }
 
 html[data-theme] .border-\[\#1a1a1a\],
 html[data-theme] .border-\[\#1f1f1f\],
 html[data-theme] .border-\[\#262626\],
 html[data-theme] .border-\[\#2a2a2a\],
-html[data-theme] .border-\[\#2d2d2d\] { border-color: var(--panel-border) !important; }
+html[data-theme] .border-\[\#2c2c2c\],
+html[data-theme] .border-\[\#2d2d2d\],
+html[data-theme] .border-\[\#333333\],
+html[data-theme] .border-\[\#3a3a3a\],
+html[data-theme] .border-\[\#3f3f46\],
+html[data-theme] .border-\[\#444444\],
+html[data-theme] .border-\[\#5a5a5a\] { border-color: var(--panel-border) !important; }
+html[data-theme] .hover\:border-\[\#2f2f2f\]:hover,
+html[data-theme] .hover\:border-\[\#3a3a3a\]:hover,
+html[data-theme] .hover\:border-\[\#444444\]:hover,
+html[data-theme] .hover\:border-\[\#5a5a5a\]:hover { border-color: var(--btn-ghost-border-hover) !important; }
 
 html[data-theme] .text-\[\#e5e5e5\],
-html[data-theme] .text-\[\#d4d4d8\] { color: var(--text-primary) !important; }
+html[data-theme] .text-\[\#d4d4d8\],
+html[data-theme] .text-\[\#d1d5db\] { color: var(--text-primary) !important; }
 html[data-theme] .text-\[\#a3a3a3\],
 html[data-theme] .text-\[\#9ca3af\],
+html[data-theme] .text-\[\#a1a1aa\],
 html[data-theme] .text-\[\#888888\] { color: var(--text-secondary) !important; }
+html[data-theme] .text-\[\#71717a\],
 html[data-theme] .text-\[\#737373\],
 html[data-theme] .text-\[\#6b7280\],
+html[data-theme] .text-\[\#666666\],
 html[data-theme] .text-\[\#525252\] { color: var(--text-tertiary) !important; }
+html[data-theme] .text-\[\#333333\],
+html[data-theme] .text-\[\#7b7b80\] { color: var(--text-muted) !important; }
 
 html[data-theme="paper-light"] .app-panel .text-white,
 html[data-theme="sandstorm-light"] .app-panel .text-white,
 html[data-theme="ice-light"] .app-panel .text-white { color: var(--text-primary) !important; }
+html[data-theme="paper-light"] .text-white,
+html[data-theme="sandstorm-light"] .text-white,
+html[data-theme="ice-light"] .text-white { color: var(--text-primary) !important; }
+html[data-theme="paper-light"] .border-white,
+html[data-theme="sandstorm-light"] .border-white,
+html[data-theme="ice-light"] .border-white { border-color: var(--input-border-focus) !important; }
 
 html[data-theme="paper-light"] .hover\:text-white:hover,
 html[data-theme="sandstorm-light"] .hover\:text-white:hover,

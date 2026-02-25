@@ -22,7 +22,6 @@ export interface WorkspaceConfig {
   context: string;
   envVars: string;
   defaultCommand: string;
-  mcpServers: string;
   lastAccessed: number;
 }
 

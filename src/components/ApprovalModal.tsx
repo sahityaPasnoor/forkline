@@ -53,10 +53,10 @@ const ApprovalModal: React.FC<ApprovalModalProps> = ({ isOpen, request, taskName
               queue: {queueCount - 1} more pending
             </div>
           )}
-          <button onClick={onReject} className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm font-medium rounded flex items-center transition-colors">
+          <button onClick={onReject} className="btn-danger px-4 py-2 text-sm font-medium rounded">
             <X size={16} className="mr-2" /> Deny Request
           </button>
-          <button onClick={onApprove} className="px-5 py-2 bg-amber-600 hover:bg-amber-500 text-white text-sm font-bold rounded flex items-center transition-colors shadow-lg shadow-amber-900/20">
+          <button onClick={onApprove} className="btn-warning px-5 py-2 text-sm font-bold rounded shadow-lg shadow-amber-900/20">
             <Check size={16} className="mr-2" /> Approve & Execute
           </button>
         </div>

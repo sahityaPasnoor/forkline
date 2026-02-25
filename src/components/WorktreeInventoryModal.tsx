@@ -63,20 +63,27 @@ const WorktreeInventoryModal: React.FC<WorktreeInventoryModalProps> = ({
   const uniqueProjects = useMemo(() => {
     return Array.from(new Set(projectPaths.map(p => p.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   }, [projectPaths]);
+  const uniqueProjectsKey = useMemo(() => uniqueProjects.join('\n'), [uniqueProjects]);
 
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
+    const projectsToLoad = uniqueProjects;
+
+    if (projectsToLoad.length === 0) {
+      setInventory({});
+      return;
+    }
 
     const load = async () => {
       const seed: Record<string, ProjectInventory> = {};
-      uniqueProjects.forEach((projectPath) => {
+      projectsToLoad.forEach((projectPath) => {
         seed[projectPath] = { loading: true, worktrees: [] };
       });
       setInventory(seed);
 
       const results = await Promise.all(
-        uniqueProjects.map(async (projectPath) => {
+        projectsToLoad.map(async (projectPath) => {
           const res = await window.electronAPI.listWorktrees(projectPath);
           if (!res.success) {
             return {
@@ -105,7 +112,7 @@ const WorktreeInventoryModal: React.FC<WorktreeInventoryModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, uniqueProjects]);
+  }, [isOpen, uniqueProjectsKey]);
 
   if (!isOpen) return null;
 
@@ -200,7 +207,7 @@ const WorktreeInventoryModal: React.FC<WorktreeInventoryModalProps> = ({
                                 </button>
                                 <button
                                   onClick={() => onDeleteWorktree(projectPath, worktree.path, worktree.branchName)}
-                                  className="btn-ghost px-3 py-1 rounded text-[10px] uppercase tracking-wider text-red-300 hover:text-red-200 flex items-center"
+                                  className="btn-danger px-3 py-1 rounded text-[10px] uppercase tracking-wider flex items-center"
                                   title="Delete this worktree and branch"
                                 >
                                   <Trash2 size={10} className="mr-1" />
@@ -221,7 +228,7 @@ const WorktreeInventoryModal: React.FC<WorktreeInventoryModalProps> = ({
                                 </button>
                                 <button
                                   onClick={() => onDeleteWorktree(projectPath, worktree.path, worktree.branchName)}
-                                  className="btn-ghost px-3 py-1 rounded text-[10px] uppercase tracking-wider text-red-300 hover:text-red-200 flex items-center"
+                                  className="btn-danger px-3 py-1 rounded text-[10px] uppercase tracking-wider flex items-center"
                                   title="Delete this worktree and branch"
                                 >
                                   <Trash2 size={10} className="mr-1" />

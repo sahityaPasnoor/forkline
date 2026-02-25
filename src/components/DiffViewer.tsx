@@ -47,7 +47,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ isOpen, onClose, onConfirm, wor
               Diff mode: {diffMode === 'syntax' ? 'syntax-aware (difftastic)' : 'plain git diff'}
             </div>
           </div>
-          <button onClick={onClose} className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"><X size={20} /></button>
+          <button onClick={onClose} className="btn-ghost btn-icon rounded-md"><X size={20} /></button>
         </div>
 
         <div className="px-4 py-2 border-b border-[var(--panel-border)] flex items-center gap-3 text-[11px] text-[var(--text-secondary)] font-mono">
@@ -73,8 +73,8 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ isOpen, onClose, onConfirm, wor
         </div>
 
         <div className="p-4 border-t border-[var(--panel-border)] flex justify-end space-x-3 bg-[var(--panel)]">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">Cancel</button>
-          <button onClick={onConfirm} className="px-4 py-2 bg-green-700 hover:bg-green-600 text-white text-sm rounded flex items-center">
+          <button onClick={onClose} className="btn-ghost px-4 py-2 text-sm">Cancel</button>
+          <button onClick={onConfirm} className="btn-success px-4 py-2 text-sm rounded">
             <GitMerge size={16} className="mr-2" /> Merge & Close Session
           </button>
         </div>

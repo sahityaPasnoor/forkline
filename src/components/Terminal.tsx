@@ -1,12 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { ArrowRightLeft, GitMerge, Code, AlertTriangle, TerminalSquare, Pause, Play, Map, Trash2 } from 'lucide-react';
+import { GitMerge, AlertTriangle, Trash2, GitPullRequest } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 import type { LivingSpecPreference, TaskUsage } from '../models/orchestrator';
 import { formatTaskCost, formatTaskUsage } from '../lib/usageUtils';
 import { detectAgentCapabilities, resolveQuickActionPlan, type QuickActionId, type QuickActionStep } from '../lib/quickActions';
-import { buildAgentLaunchPlan } from '../lib/agentProfiles';
+import { buildAgentLaunchPlan, resolveAgentProfile } from '../lib/agentProfiles';
 
 interface TerminalProps {
   taskId: string;
@@ -15,132 +15,268 @@ interface TerminalProps {
   context?: string;
   envVars?: string;
   prompt?: string;
-  mcpServers?: string;
-  mcpEnabled?: boolean;
   projectPath: string;
+  parentBranch?: string;
   livingSpecPreference?: LivingSpecPreference;
+  livingSpecOverridePath?: string;
   packageStoreStrategy?: 'off' | 'pnpm_global' | 'polyglot_global';
   pnpmStorePath?: string;
   sharedCacheRoot?: string;
   sandboxMode?: 'off' | 'auto' | 'seatbelt' | 'firejail';
   networkGuard?: 'off' | 'none';
+  isActive?: boolean;
   shouldBootstrap?: boolean;
-  onBootstrapped?: () => void;
   capabilities?: { autoMerge: boolean };
   taskUsage?: TaskUsage;
   isBlocked?: boolean;
   blockedReason?: string;
-  onHandover?: () => void;
-  onMerge?: () => void;
-  onDelete?: () => void;
+  onMerge?: (taskId: string) => void;
+  onDelete?: (taskId: string) => void;
+  onBootstrapped?: (taskId: string) => void;
 }
 
-const Terminal: React.FC<TerminalProps> = ({
-  taskId,
-  cwd,
-  agentCommand,
-  context,
-  envVars,
-  prompt,
-  mcpServers,
-  mcpEnabled,
-  projectPath,
-  livingSpecPreference,
-  packageStoreStrategy,
-  pnpmStorePath,
-  sharedCacheRoot,
-  sandboxMode,
-  networkGuard,
-  shouldBootstrap,
-  onBootstrapped,
-  capabilities,
-  taskUsage,
-  isBlocked,
-  blockedReason,
-  onHandover,
-  onMerge,
-  onDelete
-}) => {
-  const fallbackTaskControlUrl = `http://127.0.0.1:34567/api/task/${taskId}`;
-  const terminalRef = useRef<HTMLDivElement>(null);
-  const terminalInstance = useRef<XTerm | null>(null);
-  const fitAddonInstance = useRef<FitAddon | null>(null);
-  const controlTaskUrlRef = useRef(fallbackTaskControlUrl);
-  const controlAuthTokenRef = useRef('');
-  const ptyEnvRef = useRef<Record<string, string> | null>(null);
-  const lastQuickActionAtRef = useRef(0);
-  const lastAgentLaunchAtRef = useRef(0);
-  const ptyRunningRef = useRef(false);
-  const isInitialized = useRef(false);
-  const onBootstrappedRef = useRef(onBootstrapped);
-  const capabilitiesProfile = useMemo(() => detectAgentCapabilities(agentCommand), [agentCommand]);
-  const usageSummaryLabel = useMemo(() => formatTaskUsage(taskUsage), [taskUsage]);
-  const usageCostLabel = useMemo(() => formatTaskCost(taskUsage), [taskUsage]);
-  const hasUsageBadge = !!usageSummaryLabel || !!usageCostLabel;
-  const usageUpdatedLabel = useMemo(() => {
-    if (!taskUsage?.updatedAt || !Number.isFinite(taskUsage.updatedAt)) return null;
-    return new Date(taskUsage.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }, [taskUsage]);
+interface PendingPtyContinuation {
+  continuation: () => void;
+  timeoutId: number;
+}
 
-  const buildPtyEnv = useCallback((controlTaskUrl: string, controlAuthToken?: string) => {
-    const customEnv: Record<string, string> = {
-      MULTI_AGENT_IDE_URL: controlTaskUrl || fallbackTaskControlUrl,
-      MULTI_AGENT_IDE_TOKEN: controlAuthToken || '',
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor',
-      TERM_PROGRAM: 'Forkline',
-      FORCE_COLOR: '1',
-      CLICOLOR: '1',
-      CLICOLOR_FORCE: '1',
-      FORKLINE_MCP_ENABLED: mcpEnabled ? '1' : '0',
-      FORKLINE_MCP_CONFIG_PATH: '.agent_cache/mcp.json',
-      FORKLINE_SPEC_PATH: '.agent_cache/FORKLINE_SPEC.md',
-      FORKLINE_PACKAGE_STORE_STRATEGY: packageStoreStrategy || 'off',
-      FORKLINE_SANDBOX_MODE: sandboxMode || 'off',
-      FORKLINE_NETWORK_GUARD: networkGuard || 'off'
-    };
-    if (pnpmStorePath?.trim()) {
-      customEnv.FORKLINE_PNPM_STORE_PATH = pnpmStorePath.trim();
+interface PendingShellPlan {
+  steps: QuickActionStep[];
+  timeoutId: number;
+}
+
+interface PtyModeSnapshot {
+  mode: string;
+  modeSeq: number;
+  isBlocked: boolean;
+  blockedReason?: string;
+}
+
+const isShellLikeMode = (mode: string) => mode === 'shell' || mode === 'exited';
+const isAgentLikeMode = (mode: string) => mode === 'agent' || mode === 'blocked' || mode === 'tui';
+const isResumeEligibleMode = (mode: string) => isShellLikeMode(mode) || mode === 'booting';
+const isCsiResponseParam = (value: string) => (
+  (value >= '0' && value <= '9')
+  || value === ';'
+  || value === '?'
+  || value === '>'
+  || value === ':'
+);
+
+const stripOrphanTerminalResponsePayload = (input: string) => {
+  let sanitized = input;
+  // Split DA/DSR payload fragments can occasionally leak without ESC prefix.
+  sanitized = sanitized.replace(
+    /(^|[\r\n])[ \t]*\??[0-9]{1,3}(?:;[0-9]{1,3}){0,6}[cnR](?=$|[\r\n])/g,
+    '$1'
+  );
+  // Handle compact fragments that are concatenated onto a prompt line.
+  sanitized = sanitized.replace(
+    /(^|[\r\n>:\s])[ \t]*(?:[0-9]{1,3}(?:;[0-9]{1,3}){1,6}c){1,8}(?=$|[\r\n:\s])/g,
+    '$1'
+  );
+  sanitized = sanitized.replace(
+    /(^|[\r\n>:\s])[ \t]*(?:25h){1,6}(?=$|[\r\n:\s])/g,
+    '$1'
+  );
+  return {
+    sanitized,
+    changed: sanitized !== input
+  };
+};
+
+const stripTerminalControlResponses = (input: string, carry = '', stripOrphansFromPreviousChunk = false) => {
+  const chunk = `${carry}${String(input || '')}`;
+  if (!chunk) return { sanitized: '', carry: '', strippedControlResponse: false };
+
+  let sanitized = '';
+  let nextCarry = '';
+  let strippedControlResponse = false;
+
+  const consumeCsiResponse = (marker: string, start: number, payloadOffset: number) => {
+    if (marker === 'I' || marker === 'O') {
+      strippedControlResponse = true;
+      return { consumed: true, nextIndex: start + payloadOffset + 1 };
     }
-    if (sharedCacheRoot?.trim()) {
-      customEnv.FORKLINE_SHARED_CACHE_ROOT = sharedCacheRoot.trim();
+    if (marker === '?' || marker === '>' || (marker >= '0' && marker <= '9')) {
+      let j = start + payloadOffset + 1;
+      while (j < chunk.length && isCsiResponseParam(chunk[j])) {
+        j += 1;
+      }
+      if (j >= chunk.length) {
+        nextCarry = chunk.slice(start);
+        return { consumed: true, nextIndex: chunk.length };
+      }
+      if (chunk[j] === 'c' || chunk[j] === 'n' || chunk[j] === 'R') {
+        strippedControlResponse = true;
+        return { consumed: true, nextIndex: j + 1 };
+      }
+    }
+    return { consumed: false, nextIndex: start + 1 };
+  };
+
+  for (let i = 0; i < chunk.length;) {
+    const ch = chunk[i];
+    if (ch !== '\x1b') {
+      if (ch === '\x9b') {
+        if (i + 1 >= chunk.length) {
+          nextCarry = chunk.slice(i);
+          break;
+        }
+        const parsed = consumeCsiResponse(chunk[i + 1], i, 1);
+        if (parsed.consumed) {
+          i = parsed.nextIndex;
+          continue;
+        }
+      }
+      sanitized += ch;
+      i += 1;
+      continue;
     }
 
-    if (envVars) {
-      envVars.split('\n').forEach(line => {
-        const [k, ...rest] = line.split('=');
-        const value = rest.join('=');
-        if (k && value) customEnv[k.trim()] = value.trim();
-      });
+    if (i + 1 >= chunk.length) {
+      nextCarry = chunk.slice(i);
+      break;
     }
 
-    return customEnv;
-  }, [envVars, mcpEnabled, fallbackTaskControlUrl, sandboxMode, networkGuard, packageStoreStrategy, pnpmStorePath, sharedCacheRoot]);
+    if (chunk[i + 1] !== '[') {
+      if (chunk[i + 1] === ']') {
+        let j = i + 2;
+        let terminated = false;
+        while (j < chunk.length) {
+          if (chunk[j] === '\u0007') {
+            terminated = true;
+            j += 1;
+            break;
+          }
+          if (chunk[j] === '\x1b' && j + 1 < chunk.length && chunk[j + 1] === '\\') {
+            terminated = true;
+            j += 2;
+            break;
+          }
+          j += 1;
+        }
+        if (!terminated) {
+          nextCarry = chunk.slice(i);
+          break;
+        }
+        strippedControlResponse = true;
+        i = j;
+        continue;
+      }
+      sanitized += ch;
+      i += 1;
+      continue;
+    }
 
-  useEffect(() => {
-    onBootstrappedRef.current = onBootstrapped;
-  }, [onBootstrapped]);
+    if (i + 2 >= chunk.length) {
+      nextCarry = chunk.slice(i);
+      break;
+    }
 
-  useEffect(() => {
-    const next = `http://127.0.0.1:34567/api/task/${taskId}`;
-    controlTaskUrlRef.current = next;
-  }, [taskId]);
+    const marker = chunk[i + 2];
+    if (marker === 'I' || marker === 'O') {
+      strippedControlResponse = true;
+      i += 3;
+      continue;
+    }
 
-  useEffect(() => {
-    const applyTheme = () => {
-      const term = terminalInstance.current;
-      if (!term) return;
-      const cssVars = getComputedStyle(document.documentElement);
-      const terminalBackground = cssVars.getPropertyValue('--xterm-bg').trim() || '#000000';
-      const terminalForeground = cssVars.getPropertyValue('--xterm-fg').trim() || '#e5e5e5';
-      const terminalCursor = cssVars.getPropertyValue('--xterm-cursor').trim() || '#ffffff';
-      const terminalSelection = cssVars.getPropertyValue('--xterm-selection').trim() || 'rgba(255, 255, 255, 0.2)';
-      term.options.theme = {
-        background: terminalBackground,
-        foreground: terminalForeground,
-        cursor: terminalCursor,
-        cursorAccent: '#000000',
-        selectionBackground: terminalSelection,
+    const parsed = consumeCsiResponse(marker, i, 2);
+    if (parsed.consumed) {
+      i = parsed.nextIndex;
+      continue;
+    }
+
+    sanitized += ch;
+    i += 1;
+  }
+
+  if ((strippedControlResponse || stripOrphansFromPreviousChunk) && sanitized) {
+    const orphanResult = stripOrphanTerminalResponsePayload(sanitized);
+    sanitized = orphanResult.sanitized;
+    if (orphanResult.changed) {
+      strippedControlResponse = true;
+    }
+  }
+
+  return { sanitized, carry: nextCarry, strippedControlResponse };
+};
+const SAFE_BRANCH_PATTERN = /^[a-zA-Z0-9._/-]{1,120}$/;
+
+const isLivingSpecPreferenceEqual = (a?: LivingSpecPreference, b?: LivingSpecPreference) => (
+  (a?.mode || '') === (b?.mode || '')
+  && (a?.selectedPath || '') === (b?.selectedPath || '')
+);
+
+const isTaskUsageEqual = (a?: TaskUsage, b?: TaskUsage) => (
+  (a?.contextTokens ?? null) === (b?.contextTokens ?? null)
+  && (a?.promptTokens ?? null) === (b?.promptTokens ?? null)
+  && (a?.completionTokens ?? null) === (b?.completionTokens ?? null)
+  && (a?.totalTokens ?? null) === (b?.totalTokens ?? null)
+  && (a?.contextWindow ?? null) === (b?.contextWindow ?? null)
+  && (a?.percentUsed ?? null) === (b?.percentUsed ?? null)
+  && (a?.costUsd ?? null) === (b?.costUsd ?? null)
+  && (a?.promptCostUsd ?? null) === (b?.promptCostUsd ?? null)
+  && (a?.completionCostUsd ?? null) === (b?.completionCostUsd ?? null)
+  && (a?.updatedAt ?? null) === (b?.updatedAt ?? null)
+);
+
+const areTerminalPropsEqual = (prev: TerminalProps, next: TerminalProps) => (
+  prev.taskId === next.taskId
+  && prev.cwd === next.cwd
+  && prev.agentCommand === next.agentCommand
+  && prev.context === next.context
+  && prev.envVars === next.envVars
+  && prev.prompt === next.prompt
+  && prev.projectPath === next.projectPath
+  && prev.parentBranch === next.parentBranch
+  && isLivingSpecPreferenceEqual(prev.livingSpecPreference, next.livingSpecPreference)
+  && prev.livingSpecOverridePath === next.livingSpecOverridePath
+  && prev.packageStoreStrategy === next.packageStoreStrategy
+  && prev.pnpmStorePath === next.pnpmStorePath
+  && prev.sharedCacheRoot === next.sharedCacheRoot
+  && prev.sandboxMode === next.sandboxMode
+  && prev.networkGuard === next.networkGuard
+  && prev.isActive === next.isActive
+  && prev.shouldBootstrap === next.shouldBootstrap
+  && (prev.capabilities?.autoMerge ?? false) === (next.capabilities?.autoMerge ?? false)
+  && isTaskUsageEqual(prev.taskUsage, next.taskUsage)
+  && prev.isBlocked === next.isBlocked
+  && prev.blockedReason === next.blockedReason
+  && prev.onMerge === next.onMerge
+  && prev.onDelete === next.onDelete
+  && prev.onBootstrapped === next.onBootstrapped
+);
+
+const resolveTerminalTheme = () => {
+  const cssVars = getComputedStyle(document.documentElement);
+  const terminalBackground = cssVars.getPropertyValue('--xterm-bg').trim() || '#000000';
+  const terminalForeground = cssVars.getPropertyValue('--xterm-fg').trim() || '#e5e5e5';
+  const terminalCursor = cssVars.getPropertyValue('--xterm-cursor').trim() || '#ffffff';
+  const terminalSelection = cssVars.getPropertyValue('--xterm-selection').trim() || 'rgba(255, 255, 255, 0.2)';
+  const themeId = (document.documentElement.getAttribute('data-theme') || '').trim().toLowerCase();
+  const isLightTheme = themeId.endsWith('light');
+
+  const palette = isLightTheme
+    ? {
+        black: '#1f2937',
+        red: '#dc2626',
+        green: '#16a34a',
+        yellow: '#a16207',
+        blue: '#2563eb',
+        magenta: '#a21caf',
+        cyan: '#0e7490',
+        white: '#334155',
+        brightBlack: '#64748b',
+        brightRed: '#ef4444',
+        brightGreen: '#22c55e',
+        brightYellow: '#ca8a04',
+        brightBlue: '#3b82f6',
+        brightMagenta: '#c026d3',
+        brightCyan: '#0891b2',
+        brightWhite: '#0f172a'
+      }
+    : {
         black: '#1f2937',
         red: '#ef4444',
         green: '#22c55e',
@@ -158,6 +294,282 @@ const Terminal: React.FC<TerminalProps> = ({
         brightCyan: '#22d3ee',
         brightWhite: '#ffffff'
       };
+
+  return {
+    minimumContrastRatio: isLightTheme ? 4.5 : 1,
+    theme: {
+      background: terminalBackground,
+      foreground: terminalForeground,
+      cursor: terminalCursor,
+      cursorAccent: isLightTheme ? '#f8fafc' : '#000000',
+      selectionBackground: terminalSelection,
+      ...palette
+    }
+  };
+};
+
+const Terminal: React.FC<TerminalProps> = ({
+  taskId,
+  cwd,
+  agentCommand,
+  context,
+  envVars,
+  prompt,
+  projectPath,
+  parentBranch,
+  livingSpecPreference,
+  livingSpecOverridePath,
+  packageStoreStrategy,
+  pnpmStorePath,
+  sharedCacheRoot,
+  sandboxMode,
+  networkGuard,
+  isActive = true,
+  shouldBootstrap,
+  onBootstrapped,
+  capabilities,
+  taskUsage,
+  isBlocked,
+  blockedReason,
+  onMerge,
+  onDelete
+}) => {
+  const fallbackTaskControlUrl = `http://127.0.0.1:34567/api/task/${taskId}`;
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const terminalInstance = useRef<XTerm | null>(null);
+  const fitAddonInstance = useRef<FitAddon | null>(null);
+  const controlTaskUrlRef = useRef(fallbackTaskControlUrl);
+  const controlAuthTokenRef = useRef('');
+  const ptyEnvRef = useRef<Record<string, string> | null>(null);
+  const lastQuickActionAtRef = useRef(0);
+  const lastPauseAtRef = useRef(0);
+  const lastAgentLaunchAtRef = useRef(0);
+  const modeSeqRef = useRef(-1);
+  const terminalModeRef = useRef('booting');
+  const modeSnapshotRef = useRef<PtyModeSnapshot>({ mode: 'booting', modeSeq: 0, isBlocked: false });
+  const ptyRunningRef = useRef(false);
+  const ptyStartInFlightRef = useRef(false);
+  const agentLikelyActiveRef = useRef(false);
+  const shouldBootstrapRef = useRef(shouldBootstrap);
+  const pendingShellPlanRef = useRef<PendingShellPlan | null>(null);
+  const [terminalMode, setTerminalMode] = useState('booting');
+  const [quickActionNotice, setQuickActionNotice] = useState<string | null>(null);
+  const quickActionNoticeTimeoutRef = useRef<number | null>(null);
+  const isDisposedRef = useRef(false);
+  const pendingPtyContinuationsRef = useRef<PendingPtyContinuation[]>([]);
+  const shellInputCarryRef = useRef('');
+  const recentControlResponseRef = useRef(false);
+  const lastCursorRecoverAtRef = useRef(0);
+  const isInitialized = useRef(false);
+  const onBootstrappedRef = useRef(onBootstrapped);
+  const capabilitiesProfile = useMemo(() => detectAgentCapabilities(agentCommand), [agentCommand]);
+  const agentProfile = useMemo(() => resolveAgentProfile(agentCommand), [agentCommand]);
+  const [hasLiveMode, setHasLiveMode] = useState(false);
+  const [liveBlockedState, setLiveBlockedState] = useState<{ isBlocked: boolean; blockedReason?: string }>({
+    isBlocked: !!isBlocked,
+    blockedReason: isBlocked ? blockedReason : undefined
+  });
+  const effectiveBlocked = hasLiveMode ? liveBlockedState.isBlocked : !!isBlocked;
+  const effectiveBlockedReason = (hasLiveMode ? liveBlockedState.blockedReason : blockedReason) || blockedReason;
+  const usageSummaryLabel = useMemo(() => formatTaskUsage(taskUsage), [taskUsage]);
+  const usageCostLabel = useMemo(() => formatTaskCost(taskUsage), [taskUsage]);
+  const hasUsageBadge = !!usageSummaryLabel || !!usageCostLabel;
+  const usageUpdatedLabel = useMemo(() => {
+    if (!taskUsage?.updatedAt || !Number.isFinite(taskUsage.updatedAt)) return null;
+    return new Date(taskUsage.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }, [taskUsage]);
+  const resolvedLivingSpecPath = useMemo(() => {
+    const override = livingSpecOverridePath?.trim();
+    if (override) return override;
+    const selected = livingSpecPreference?.mode === 'single' ? livingSpecPreference.selectedPath?.trim() : '';
+    if (selected) return selected;
+    return '.agent_cache/FORKLINE_SPEC.md';
+  }, [livingSpecOverridePath, livingSpecPreference]);
+
+  const setAgentModeLikely = useCallback((next: boolean) => {
+    if (agentLikelyActiveRef.current === next) return;
+    agentLikelyActiveRef.current = next;
+  }, []);
+
+  const ensureCursorVisible = useCallback(() => {
+    if (!ptyRunningRef.current) return;
+    if (!isShellLikeMode(terminalModeRef.current)) return;
+    const now = Date.now();
+    if (now - lastCursorRecoverAtRef.current < 300) return;
+    lastCursorRecoverAtRef.current = now;
+    // Keep cursor recovery local to xterm so control bytes are not injected into agent input.
+    terminalInstance.current?.write('\u001b[?25h');
+  }, []);
+
+  const buildPtyEnv = useCallback((controlTaskUrl: string, controlAuthToken?: string) => {
+    const customEnv: Record<string, string> = {
+      MULTI_AGENT_IDE_URL: controlTaskUrl || fallbackTaskControlUrl,
+      MULTI_AGENT_IDE_TOKEN: controlAuthToken || '',
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      TERM_PROGRAM: 'Forkline',
+      FORCE_COLOR: '1',
+      CLICOLOR: '1',
+      CLICOLOR_FORCE: '1',
+      FORKLINE_SPEC_PATH: resolvedLivingSpecPath,
+      FORKLINE_PACKAGE_STORE_STRATEGY: packageStoreStrategy || 'off',
+      FORKLINE_SANDBOX_MODE: sandboxMode || 'off',
+      FORKLINE_NETWORK_GUARD: networkGuard || 'off',
+      FORKLINE_AGENT_COMMAND: agentCommand,
+      FORKLINE_AGENT_PROVIDER: agentProfile.id
+    };
+    if (pnpmStorePath?.trim()) {
+      customEnv.FORKLINE_PNPM_STORE_PATH = pnpmStorePath.trim();
+    }
+    if (sharedCacheRoot?.trim()) {
+      customEnv.FORKLINE_SHARED_CACHE_ROOT = sharedCacheRoot.trim();
+    }
+    if (livingSpecOverridePath?.trim()) {
+      customEnv.FORKLINE_SPEC_OVERRIDE_PATH = livingSpecOverridePath.trim();
+    }
+
+    if (envVars) {
+      envVars.split('\n').forEach(line => {
+        const [k, ...rest] = line.split('=');
+        const value = rest.join('=');
+        if (k && value) customEnv[k.trim()] = value.trim();
+      });
+    }
+
+    return customEnv;
+  }, [envVars, fallbackTaskControlUrl, sandboxMode, networkGuard, packageStoreStrategy, pnpmStorePath, sharedCacheRoot, livingSpecOverridePath, resolvedLivingSpecPath, agentCommand, agentProfile.id]);
+
+  useEffect(() => {
+    onBootstrappedRef.current = onBootstrapped;
+  }, [onBootstrapped]);
+
+  useEffect(() => {
+    shouldBootstrapRef.current = shouldBootstrap;
+  }, [shouldBootstrap]);
+
+  useEffect(() => {
+    return () => {
+      if (quickActionNoticeTimeoutRef.current !== null) {
+        window.clearTimeout(quickActionNoticeTimeoutRef.current);
+        quickActionNoticeTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasLiveMode) {
+      setLiveBlockedState({
+        isBlocked: !!isBlocked,
+        blockedReason: isBlocked ? blockedReason : undefined
+      });
+    }
+  }, [blockedReason, hasLiveMode, isBlocked]);
+
+  useEffect(() => {
+    if (effectiveBlocked) {
+      setAgentModeLikely(true);
+    }
+  }, [effectiveBlocked, setAgentModeLikely]);
+
+  const clearPendingShellPlan = useCallback(() => {
+    const pending = pendingShellPlanRef.current;
+    if (!pending) return null;
+    pendingShellPlanRef.current = null;
+    window.clearTimeout(pending.timeoutId);
+    return pending;
+  }, []);
+
+  const applyModeSnapshot = useCallback((snapshot: PtyModeSnapshot) => {
+    const seq = Number.isFinite(snapshot.modeSeq) ? snapshot.modeSeq : 0;
+    if (seq <= modeSeqRef.current) return;
+    modeSeqRef.current = seq;
+    const mode = snapshot.mode || 'booting';
+    terminalModeRef.current = mode;
+    modeSnapshotRef.current = {
+      mode,
+      modeSeq: seq,
+      isBlocked: !!snapshot.isBlocked,
+      blockedReason: snapshot.isBlocked ? snapshot.blockedReason : undefined
+    };
+    setHasLiveMode(true);
+    setLiveBlockedState({
+      isBlocked: !!snapshot.isBlocked,
+      blockedReason: snapshot.isBlocked ? snapshot.blockedReason : undefined
+    });
+    setTerminalMode(mode);
+
+    if (snapshot.isBlocked) {
+      setAgentModeLikely(true);
+      return;
+    }
+
+    if (isShellLikeMode(mode)) {
+      setAgentModeLikely(false);
+      ensureCursorVisible();
+      return;
+    }
+    if (isAgentLikeMode(mode) || mode === 'booting') {
+      setAgentModeLikely(true);
+    }
+  }, [ensureCursorVisible, setAgentModeLikely]);
+
+  useEffect(() => {
+    const term = terminalInstance.current;
+    if (!term) return;
+    if (!isActive) {
+      try {
+        term.blur();
+      } catch {
+        // Ignore blur failures from transient mounts.
+      }
+      return;
+    }
+
+    const rafId = requestAnimationFrame(() => {
+      const terminal = terminalInstance.current;
+      const fitAddon = fitAddonInstance.current;
+      if (!terminal || isDisposedRef.current) return;
+      try {
+        fitAddon?.fit();
+        window.electronAPI.resizePty(taskId, terminal.cols, terminal.rows);
+      } catch {
+        // Ignore fit/resize races while pane visibility is changing.
+      }
+      terminal.focus();
+      // Restore local cursor visibility only for shell prompts.
+      ensureCursorVisible();
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [isActive, taskId, ensureCursorVisible]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    const rafId = requestAnimationFrame(() => {
+      const term = terminalInstance.current;
+      const fitAddon = fitAddonInstance.current;
+      if (!term || !fitAddon || isDisposedRef.current) return;
+      try {
+        fitAddon.fit();
+        window.electronAPI.resizePty(taskId, term.cols, term.rows);
+      } catch {
+        // Ignore fit races while terminal overlays settle.
+      }
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [taskId, isActive, quickActionNotice, effectiveBlocked, usageSummaryLabel, usageCostLabel, usageUpdatedLabel]);
+
+  useEffect(() => {
+    const next = `http://127.0.0.1:34567/api/task/${taskId}`;
+    controlTaskUrlRef.current = next;
+  }, [taskId]);
+
+  useEffect(() => {
+    const applyTheme = () => {
+      const term = terminalInstance.current;
+      if (!term) return;
+      const resolvedTheme = resolveTerminalTheme();
+      term.options.minimumContrastRatio = resolvedTheme.minimumContrastRatio;
+      term.options.theme = resolvedTheme.theme;
       try {
         term.refresh(0, term.rows - 1);
       } catch {
@@ -185,46 +597,26 @@ const Terminal: React.FC<TerminalProps> = ({
     let removePtyListener: (() => void) | null = null;
     let removePtyStateListener: (() => void) | null = null;
     let removePtyExitListener: (() => void) | null = null;
+    let removePtyModeListener: (() => void) | null = null;
     let didBootstrap = false;
     let disposed = false;
     let focusRafId: number | null = null;
+    isDisposedRef.current = false;
 
     const initTerminal = () => {
+      if (disposed || isDisposedRef.current) return false;
       if (isInitialized.current || !terminalRef.current) return false;
       const rect = terminalRef.current.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return false;
 
       try {
-        const cssVars = getComputedStyle(document.documentElement);
-        const terminalBackground = cssVars.getPropertyValue('--xterm-bg').trim() || '#000000';
-        const terminalForeground = cssVars.getPropertyValue('--xterm-fg').trim() || '#e5e5e5';
-        const terminalCursor = cssVars.getPropertyValue('--xterm-cursor').trim() || '#ffffff';
-        const terminalSelection = cssVars.getPropertyValue('--xterm-selection').trim() || 'rgba(255, 255, 255, 0.2)';
+        const resolvedTheme = resolveTerminalTheme();
         term = new XTerm({
-          theme: {
-            background: terminalBackground,
-            foreground: terminalForeground,
-            cursor: terminalCursor,
-            cursorAccent: '#000000',
-            selectionBackground: terminalSelection,
-            black: '#1f2937',
-            red: '#ef4444',
-            green: '#22c55e',
-            yellow: '#eab308',
-            blue: '#3b82f6',
-            magenta: '#d946ef',
-            cyan: '#06b6d4',
-            white: '#e5e7eb',
-            brightBlack: '#6b7280',
-            brightRed: '#f87171',
-            brightGreen: '#4ade80',
-            brightYellow: '#facc15',
-            brightBlue: '#60a5fa',
-            brightMagenta: '#e879f9',
-            brightCyan: '#22d3ee',
-            brightWhite: '#ffffff'
-          },
+          theme: resolvedTheme.theme,
+          minimumContrastRatio: resolvedTheme.minimumContrastRatio,
           cursorBlink: true,
+          cursorStyle: 'block',
+          cursorInactiveStyle: 'block',
           scrollback: 100000,
           allowTransparency: false,
           drawBoldTextInBrightColors: true,
@@ -235,7 +627,7 @@ const Terminal: React.FC<TerminalProps> = ({
           fastScrollSensitivity: 4,
           fontFamily: '"SF Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
           fontSize: 13,
-          lineHeight: 1.45
+          lineHeight: 1.2
         });
 
         fitAddon = new FitAddon();
@@ -254,22 +646,36 @@ const Terminal: React.FC<TerminalProps> = ({
           const primary = isMac ? event.metaKey : event.ctrlKey;
           const wantsCopy = (primary && key === 'c') || (event.ctrlKey && event.shiftKey && key === 'c');
           const wantsPaste = (primary && key === 'v') || (event.ctrlKey && event.shiftKey && key === 'v');
+          const wantsCommandPalette = primary && key === 'k';
 
           if (wantsCopy && term?.hasSelection()) {
             const selected = term.getSelection();
             if (selected) {
-              void navigator.clipboard.writeText(selected).catch(() => {});
+              void window.electronAPI.writeClipboardText(selected)
+                .then((result) => {
+                  if (!result?.success) {
+                    throw new Error(result?.error || 'Clipboard write failed.');
+                  }
+                })
+                .catch(() => {});
             }
             return false;
           }
 
           if (wantsPaste) {
-            void navigator.clipboard.readText()
+            void window.electronAPI.readClipboardText()
               .then((text) => {
                 if (!text || disposed) return;
                 term?.paste(text);
               })
               .catch(() => {});
+            return false;
+          }
+
+          if (wantsCommandPalette) {
+            event.preventDefault();
+            event.stopPropagation();
+            window.dispatchEvent(new CustomEvent('orchestrator:open-command-palette'));
             return false;
           }
 
@@ -280,78 +686,130 @@ const Terminal: React.FC<TerminalProps> = ({
         ptyEnvRef.current = customEnv;
 
         term.onData(data => {
-          window.electronAPI.writePty(taskId, data);
+          const filtered = stripTerminalControlResponses(
+            data,
+            shellInputCarryRef.current,
+            recentControlResponseRef.current
+          );
+          shellInputCarryRef.current = filtered.carry;
+          recentControlResponseRef.current = !!filtered.strippedControlResponse;
+          const outbound = filtered.sanitized;
+
+          if (!outbound) return;
+          window.electronAPI.writePty(taskId, outbound);
         });
 
         removePtyListener = window.electronAPI.onPtyData(taskId, (data) => {
           term?.write(data);
         });
-        removePtyStateListener = window.electronAPI.onPtyState(taskId, ({ created, running }) => {
+        removePtyStateListener = window.electronAPI.onPtyState(taskId, ({ created, running, restarted }) => {
+          if (disposed || isDisposedRef.current) return;
           ptyRunningRef.current = !!running;
+          ptyStartInFlightRef.current = false;
+          if (running) {
+            const queued = pendingPtyContinuationsRef.current.splice(0);
+            queued.forEach(({ continuation, timeoutId }) => {
+              window.clearTimeout(timeoutId);
+              continuation();
+            });
+          }
           if (didBootstrap) return;
           didBootstrap = true;
-          const shouldRelaunchAfterRestart = !!created && !shouldBootstrap;
-          if (!shouldBootstrap && !shouldRelaunchAfterRestart) {
+          const currentShouldBootstrap = !!shouldBootstrapRef.current;
+          const restoredSessionAtShellLikeMode = !currentShouldBootstrap
+            && !created
+            && !restarted
+            && isResumeEligibleMode(terminalModeRef.current);
+          const shouldRelaunchRestoredTab = !currentShouldBootstrap && (!!created || !!restarted || restoredSessionAtShellLikeMode);
+          if (!currentShouldBootstrap && !shouldRelaunchRestoredTab) {
             term?.writeln('\r\n[orchestrator] Restored tab session attached. Agent bootstrap was skipped to preserve prior context.');
             return;
           }
-          if (shouldRelaunchAfterRestart) {
-            term?.writeln('\r\n[orchestrator] Previous PTY session is not live. Relaunching agent for this tab.');
+          if (shouldRelaunchRestoredTab) {
+            const reason = created
+              ? 'No live PTY session was found'
+              : (restarted
+                ? 'Previous PTY session is not live'
+                : (terminalModeRef.current === 'booting'
+                  ? 'Restored terminal mode is not resolved yet'
+                  : 'Restored terminal is at a shell prompt'));
+            term?.writeln(`\r\n[orchestrator] ${reason}. Relaunching agent for this tab.`);
           }
-          setTimeout(() => {
+          window.setTimeout(() => {
+            if (disposed || isDisposedRef.current) return;
             const taskControlUrl = controlTaskUrlRef.current;
-            const apiDoc = `IDE Capabilities API\n--------------------\nYou are running inside Forkline.\nYou can interact with the IDE by sending POST requests to the local control server.\n\nBase URL: ${taskControlUrl}\nAuthentication:\n- Header: x-forkline-token: $MULTI_AGENT_IDE_TOKEN\n- Alternate: Authorization: Bearer $MULTI_AGENT_IDE_TOKEN\nCurrent Permissions:\n- Merge Request: ${capabilities?.autoMerge ? 'Auto-Approve' : 'Requires Human Approval'}\n\nWorkspace Metadata Paths:\n- Living Spec (if available): .agent_cache/FORKLINE_SPEC.md\n- Memory Context: .agent_cache/agent_memory.md\n\nEndpoints:\n1. POST ${taskControlUrl}/merge\n2. POST ${taskControlUrl}/todos\n3. POST ${taskControlUrl}/message\n4. POST ${taskControlUrl}/usage (or /metrics)\n\ncurl example:\ncurl -s -H \"x-forkline-token: $MULTI_AGENT_IDE_TOKEN\" -H \"content-type: application/json\" -X POST ${taskControlUrl}/todos -d '{\"todos\":[{\"id\":\"1\",\"title\":\"Implement fix\",\"status\":\"in_progress\"}]}'\n`;
+            const apiDoc = `IDE Capabilities API\n--------------------\nYou are running inside Forkline.\nYou can interact with the IDE by sending HTTP requests to the local control server.\n\nBase URL: ${taskControlUrl}\nAuthentication:\n- Header: x-forkline-token: $MULTI_AGENT_IDE_TOKEN\n- Alternate: Authorization: Bearer $MULTI_AGENT_IDE_TOKEN\nCurrent Permissions:\n- Merge Request: ${capabilities?.autoMerge ? 'Auto-Approve' : 'Requires Human Approval'}\n\nWorkspace Metadata Paths:\n- Living Spec (if available): ${resolvedLivingSpecPath}\n- Memory Context: .agent_cache/agent_memory.md\n\nEndpoints:\n1. POST ${taskControlUrl}/merge (returns 202 + requestId)\n2. GET ${taskControlUrl.replace('/api/task/' + taskId, '')}/api/approval/:requestId (poll merge status)\n3. POST ${taskControlUrl}/todos\n4. POST ${taskControlUrl}/message\n5. POST ${taskControlUrl}/usage (or /metrics)\n\nMerge wait mode:\n- Use ${taskControlUrl}/merge?wait=1 to wait for a decision inline (times out after 10 minutes).\n\ncurl example:\ncurl -s -H \"x-forkline-token: $MULTI_AGENT_IDE_TOKEN\" -H \"content-type: application/json\" -X POST ${taskControlUrl}/todos -d '{\"todos\":[{\"id\":\"1\",\"title\":\"Implement fix\",\"status\":\"in_progress\"}]}'\n`;
             void window.electronAPI
-              .prepareAgentWorkspace(cwd, projectPath, context || '', mcpServers || '', apiDoc, livingSpecPreference)
+              .prepareAgentWorkspace(
+                cwd,
+                projectPath,
+                context || '',
+                apiDoc,
+                livingSpecPreference,
+                livingSpecOverridePath
+              )
               .then((prepRes) => {
+                if (disposed || isDisposedRef.current) return;
                 const prepareSucceeded = prepRes?.success !== false;
                 if (!prepareSucceeded) {
                   const message = prepRes?.error ? `Workspace metadata warning: ${prepRes.error}` : 'Workspace metadata preparation failed.';
                   term?.writeln(`\r\n[orchestrator] ${message}`);
                 }
 
-                const launchPlan = buildAgentLaunchPlan(agentCommand, prompt, {
-                  mcpEnabled: !!mcpEnabled,
-                  hasMcpConfig: !!mcpServers?.trim() && prepareSucceeded,
-                  mcpConfigPath: '.agent_cache/mcp.json'
-                });
-                if (launchPlan.mcpStatus !== 'disabled' && launchPlan.mcpMessage) {
-                  term?.writeln(`\r\n[orchestrator] ${launchPlan.mcpMessage}`);
-                }
+                const launchPlan = buildAgentLaunchPlan(agentCommand, prompt);
 
                 if (prompt) {
                   window.electronAPI.writePty(taskId, `clear && echo -e "\\033[1;37m[Orchestrator]\\033[0m Bootstrapping task..." && ${launchPlan.command}\r`);
                 } else {
                   window.electronAPI.writePty(taskId, `clear && ${launchPlan.command}\r`);
                 }
+                setAgentModeLikely(true);
                 lastAgentLaunchAtRef.current = Date.now();
-                onBootstrappedRef.current?.();
+                onBootstrappedRef.current?.(taskId);
               })
               .catch((err) => {
+                if (disposed || isDisposedRef.current) return;
                 console.error('Failed to prepare workspace metadata:', err);
-                term?.writeln('\r\n[orchestrator] Workspace metadata setup failed. Continuing without MCP injection.');
+                term?.writeln('\r\n[orchestrator] Workspace metadata setup failed. Continuing.');
 
-                const launchPlan = buildAgentLaunchPlan(agentCommand, prompt, {
-                  mcpEnabled: !!mcpEnabled,
-                  hasMcpConfig: false,
-                  mcpConfigPath: '.agent_cache/mcp.json'
-                });
-                if (launchPlan.mcpStatus !== 'disabled' && launchPlan.mcpMessage) {
-                  term?.writeln(`\r\n[orchestrator] ${launchPlan.mcpMessage}`);
-                }
+                const launchPlan = buildAgentLaunchPlan(agentCommand, prompt);
 
                 if (prompt) {
                   window.electronAPI.writePty(taskId, `clear && echo -e "\\033[1;37m[Orchestrator]\\033[0m Bootstrapping task..." && ${launchPlan.command}\r`);
                 } else {
                   window.electronAPI.writePty(taskId, `clear && ${launchPlan.command}\r`);
                 }
+                setAgentModeLikely(true);
                 lastAgentLaunchAtRef.current = Date.now();
-                onBootstrappedRef.current?.();
+                onBootstrappedRef.current?.(taskId);
               });
           }, 200);
         });
+        removePtyModeListener = window.electronAPI.onPtyMode(taskId, (snapshot) => {
+          if (disposed || isDisposedRef.current) return;
+          applyModeSnapshot({
+            mode: snapshot.mode || 'booting',
+            modeSeq: Number.isFinite(snapshot.modeSeq) ? snapshot.modeSeq : 0,
+            isBlocked: !!snapshot.isBlocked,
+            blockedReason: snapshot.blockedReason
+          });
+        });
         removePtyExitListener = window.electronAPI.onPtyExit(taskId, ({ exitCode, signal }) => {
           ptyRunningRef.current = false;
+          ptyStartInFlightRef.current = false;
+          didBootstrap = false;
+          clearPendingShellPlan();
+          modeSeqRef.current += 1;
+          modeSnapshotRef.current = {
+            mode: 'exited',
+            modeSeq: modeSeqRef.current,
+            isBlocked: false
+          };
+          setHasLiveMode(true);
+          setLiveBlockedState({ isBlocked: false, blockedReason: undefined });
+          terminalModeRef.current = 'exited';
+          setTerminalMode('exited');
+          setAgentModeLikely(false);
           term?.writeln(`\r\n[orchestrator] PTY exited (code=${exitCode ?? 'null'} signal=${signal ?? 'none'}).`);
         });
 
@@ -360,6 +818,7 @@ const Terminal: React.FC<TerminalProps> = ({
           window.electronAPI.getControlAuthToken().catch(() => '')
         ])
           .then(([baseUrl, authToken]) => {
+            if (disposed || isDisposedRef.current) return;
             const trimmed = typeof baseUrl === 'string' ? baseUrl.trim().replace(/\/+$/, '') : '';
             const resolvedBaseUrl = trimmed || 'http://127.0.0.1:34567';
             const normalizedToken = typeof authToken === 'string' ? authToken.trim() : '';
@@ -370,11 +829,20 @@ const Terminal: React.FC<TerminalProps> = ({
             ptyEnvRef.current = customEnv;
           })
           .catch(() => {
+            if (disposed || isDisposedRef.current) return;
             customEnv = buildPtyEnv(fallbackTaskControlUrl, '');
             ptyEnvRef.current = customEnv;
           })
           .finally(() => {
+            if (disposed || isDisposedRef.current) return;
             ptyEnvRef.current = customEnv;
+            ptyStartInFlightRef.current = true;
+            modeSeqRef.current = -1;
+            terminalModeRef.current = 'booting';
+            modeSnapshotRef.current = { mode: 'booting', modeSeq: 0, isBlocked: false };
+            setHasLiveMode(false);
+            setLiveBlockedState({ isBlocked: false, blockedReason: undefined });
+            setTerminalMode('booting');
             window.electronAPI.createPty(taskId, cwd, customEnv);
           });
 
@@ -419,6 +887,7 @@ const Terminal: React.FC<TerminalProps> = ({
 
     return () => {
       disposed = true;
+      isDisposedRef.current = true;
       window.removeEventListener('resize', handleResize);
       if (focusRafId !== null) {
         cancelAnimationFrame(focusRafId);
@@ -433,36 +902,77 @@ const Terminal: React.FC<TerminalProps> = ({
       if (removePtyExitListener) {
         removePtyExitListener();
       }
+      if (removePtyModeListener) {
+        removePtyModeListener();
+      }
       if (removePtyStateListener) {
         removePtyStateListener();
       }
+      const queued = pendingPtyContinuationsRef.current.splice(0);
+      queued.forEach(({ timeoutId }) => window.clearTimeout(timeoutId));
+      clearPendingShellPlan();
+      ptyRunningRef.current = false;
+      ptyStartInFlightRef.current = false;
+      shellInputCarryRef.current = '';
+      recentControlResponseRef.current = false;
+      modeSeqRef.current = -1;
+      terminalModeRef.current = 'booting';
+      modeSnapshotRef.current = { mode: 'booting', modeSeq: 0, isBlocked: false };
+      setHasLiveMode(false);
+      setLiveBlockedState({ isBlocked: false, blockedReason: undefined });
+      setTerminalMode('booting');
+      setAgentModeLikely(false);
       window.electronAPI.detachPty(taskId);
       if (term) term.dispose();
       isInitialized.current = false;
     };
-  }, [taskId, cwd, projectPath, livingSpecPreference]);
+  }, [taskId, cwd, setAgentModeLikely, applyModeSnapshot, clearPendingShellPlan]);
 
   const focusTerminal = () => {
     requestAnimationFrame(() => {
       terminalInstance.current?.focus();
+      const mode = terminalModeRef.current;
+      if (mode === 'shell' || mode === 'exited') {
+        ensureCursorVisible();
+      }
     });
   };
 
-  const sendRaw = (data: string) => {
+  const sendRaw = useCallback((data: string) => {
     if (!data) return;
     window.electronAPI.writePty(taskId, data);
     focusTerminal();
-  };
+  }, [taskId]);
 
-  const sendLine = (line: string, clearLine = false) => {
+  const sendLine = useCallback((line: string, clearLine = false) => {
     const prefix = clearLine && line ? '\u0015' : '';
     window.electronAPI.writePty(taskId, `${prefix}${line}\r`);
     focusTerminal();
-  };
+  }, [taskId]);
 
-  const writeOrchestratorHint = (message: string) => {
-    terminalInstance.current?.writeln(`\r\n[orchestrator] ${message}`);
-  };
+  const showQuickActionNotice = useCallback((message: string, ttlMs = 4200) => {
+    const normalized = String(message || '').trim();
+    if (!normalized) return;
+    setQuickActionNotice(normalized);
+    if (quickActionNoticeTimeoutRef.current !== null) {
+      window.clearTimeout(quickActionNoticeTimeoutRef.current);
+      quickActionNoticeTimeoutRef.current = null;
+    }
+    if (ttlMs <= 0) return;
+    quickActionNoticeTimeoutRef.current = window.setTimeout(() => {
+      setQuickActionNotice((current) => (current === normalized ? null : current));
+      quickActionNoticeTimeoutRef.current = null;
+    }, ttlMs);
+  }, []);
+
+  const writeOrchestratorHint = useCallback((message: string) => {
+    showQuickActionNotice(message);
+    const mode = terminalModeRef.current;
+    const shouldWriteInTerminal = isShellLikeMode(mode);
+    if (shouldWriteInTerminal) {
+      terminalInstance.current?.writeln(`\r\n[orchestrator] ${message}`);
+    }
+  }, [showQuickActionNotice]);
 
   const recordQuickAction = (action: string, payload: Record<string, unknown> = {}) => {
     void window.electronAPI.fleetRecordEvent(taskId, 'quick_action', { action, ...payload });
@@ -476,21 +986,41 @@ const Terminal: React.FC<TerminalProps> = ({
     focusTerminal();
   };
 
-  const blurButtonOnFocus = (event: React.FocusEvent<HTMLButtonElement>) => {
-    event.currentTarget.blur();
-    focusTerminal();
-  };
-
   const ensurePtyRunning = useCallback((continuation: () => void) => {
+    if (isDisposedRef.current) return;
     if (ptyRunningRef.current) {
       continuation();
       return;
     }
-    writeOrchestratorHint('Restoring terminal process for this task.');
+    if (pendingPtyContinuationsRef.current.length === 0) {
+      writeOrchestratorHint('Restoring terminal process for this task.');
+    }
+    const timeoutId = window.setTimeout(() => {
+      const index = pendingPtyContinuationsRef.current.findIndex((entry) => entry.timeoutId === timeoutId);
+      if (index === -1 || isDisposedRef.current) return;
+      const [entry] = pendingPtyContinuationsRef.current.splice(index, 1);
+      if (!ptyRunningRef.current && pendingPtyContinuationsRef.current.length === 0) {
+        ptyStartInFlightRef.current = false;
+      }
+      if (!ptyRunningRef.current) {
+        writeOrchestratorHint('PTY startup is still in progress. Retry the action in a moment.');
+        const relaunchEnv = ptyEnvRef.current || buildPtyEnv(controlTaskUrlRef.current || fallbackTaskControlUrl);
+        ptyEnvRef.current = relaunchEnv;
+        if (!ptyStartInFlightRef.current) {
+          ptyStartInFlightRef.current = true;
+          window.electronAPI.createPty(taskId, cwd, relaunchEnv);
+        }
+        return;
+      }
+      entry.continuation();
+    }, 4500);
+    pendingPtyContinuationsRef.current.push({ continuation, timeoutId });
     const relaunchEnv = ptyEnvRef.current || buildPtyEnv(controlTaskUrlRef.current || fallbackTaskControlUrl);
     ptyEnvRef.current = relaunchEnv;
-    window.electronAPI.createPty(taskId, cwd, relaunchEnv);
-    window.setTimeout(continuation, 220);
+    if (!ptyStartInFlightRef.current) {
+      ptyStartInFlightRef.current = true;
+      window.electronAPI.createPty(taskId, cwd, relaunchEnv);
+    }
   }, [cwd, taskId, buildPtyEnv, fallbackTaskControlUrl]);
 
   const runQuickActionPlan = useCallback((steps: QuickActionStep[]) => {
@@ -519,21 +1049,126 @@ const Terminal: React.FC<TerminalProps> = ({
         }
       }
     }
-  }, [agentCommand]);
+  }, [agentCommand, sendLine, sendRaw, writeOrchestratorHint]);
+
+  const queueShellPlan = useCallback((steps: QuickActionStep[]) => {
+    if (isDisposedRef.current) return;
+    if (isShellLikeMode(terminalModeRef.current)) {
+      runQuickActionPlan(steps);
+      return;
+    }
+
+    clearPendingShellPlan();
+    const timeoutId = window.setTimeout(() => {
+      if (pendingShellPlanRef.current?.timeoutId !== timeoutId) return;
+      pendingShellPlanRef.current = null;
+      writeOrchestratorHint('Could not reach a shell prompt yet. Retry once the terminal settles.');
+    }, 3200);
+    pendingShellPlanRef.current = { steps, timeoutId };
+
+    writeOrchestratorHint('Interrupting active session and waiting for shell prompt.');
+    sendRaw('\u0003');
+  }, [clearPendingShellPlan, runQuickActionPlan, sendRaw, writeOrchestratorHint]);
+
+  useEffect(() => {
+    if (!isShellLikeMode(terminalMode)) return;
+    const pending = clearPendingShellPlan();
+    if (!pending) return;
+    runQuickActionPlan(pending.steps);
+  }, [terminalMode, clearPendingShellPlan, runQuickActionPlan]);
 
   const dispatchQuickAction = useCallback((action: QuickActionId) => {
     const now = Date.now();
     if (now - lastQuickActionAtRef.current < 180) return;
     lastQuickActionAtRef.current = now;
+    const mode = terminalModeRef.current;
+    const blocked = hasLiveMode ? liveBlockedState.isBlocked : (!!isBlocked || !!modeSnapshotRef.current.isBlocked);
+
+    if (action === 'pause') {
+      if (isShellLikeMode(mode) && !blocked) {
+        setAgentModeLikely(false);
+        writeOrchestratorHint('Terminal is already at a shell prompt. Use resume to relaunch the agent.');
+        return;
+      }
+      if (now - lastPauseAtRef.current < 900) {
+        writeOrchestratorHint('Pause already sent. Use resume if you want to relaunch the agent.');
+        return;
+      }
+      lastPauseAtRef.current = now;
+      recordQuickAction(action, {
+        target: 'shell',
+        profile: capabilitiesProfile.profile
+      });
+      ensurePtyRunning(() => {
+        clearPendingShellPlan();
+        sendRaw('\u0003');
+        setAgentModeLikely(false);
+      });
+      return;
+    }
+
+    if (action === 'resume') {
+      if (blocked) {
+        writeOrchestratorHint('Agent is waiting on a confirmation prompt. Use approve/reject first.');
+        return;
+      }
+      if (!isResumeEligibleMode(mode)) {
+        writeOrchestratorHint('Agent already appears active.');
+        setAgentModeLikely(true);
+        return;
+      }
+      recordQuickAction(action, {
+        target: 'shell',
+        profile: capabilitiesProfile.profile
+      });
+      ensurePtyRunning(() => {
+        const launchPlan = buildAgentLaunchPlan(agentCommand, undefined);
+        sendLine(launchPlan.command, true);
+        lastAgentLaunchAtRef.current = Date.now();
+        setAgentModeLikely(true);
+      });
+      return;
+    }
+
+    if (action === 'create_pr') {
+      if (blocked) {
+        writeOrchestratorHint('Agent is waiting on a confirmation prompt. Use approve/reject first.');
+        return;
+      }
+      const normalizedParent = String(parentBranch || '').trim();
+      const prTargetBranch = SAFE_BRANCH_PATTERN.test(normalizedParent) && !normalizedParent.includes('..')
+        ? normalizedParent
+        : 'main';
+      if (isShellLikeMode(mode)) {
+        setAgentModeLikely(false);
+      }
+      const canUseAgentPath = capabilitiesProfile.profile !== 'shell'
+        && isAgentLikeMode(mode);
+      if (canUseAgentPath) {
+        const instruction = `Create a pull request from the current branch into ${prTargetBranch}. Use this repository's configured provider tooling, open the PR in browser, and then paste the PR link.`;
+        const line = capabilitiesProfile.profile === 'aider' ? `/ask ${instruction}` : instruction;
+        recordQuickAction(action, {
+          target: 'agent',
+          profile: capabilitiesProfile.profile,
+          prTarget: prTargetBranch
+        });
+        ensurePtyRunning(() => {
+          sendLine(line, false);
+        });
+        return;
+      }
+    }
 
     const plan = resolveQuickActionPlan({
       action,
       agentCommand,
-      isBlocked: !!isBlocked
+      isBlocked: blocked,
+      parentBranch
     });
     recordQuickAction(action, {
       target: plan.target,
-      profile: plan.capabilities.profile
+      profile: plan.capabilities.profile,
+      prTarget: action === 'create_pr' ? (parentBranch || 'main') : undefined
     });
 
     const needsPty = plan.steps.some(step => step.kind !== 'hint');
@@ -543,24 +1178,28 @@ const Terminal: React.FC<TerminalProps> = ({
     }
 
     ensurePtyRunning(() => {
+      if (plan.target === 'shell') {
+        queueShellPlan(plan.steps);
+        return;
+      }
       runQuickActionPlan(plan.steps);
     });
-  }, [agentCommand, ensurePtyRunning, isBlocked, runQuickActionPlan]);
+  }, [
+    agentCommand,
+    capabilitiesProfile.profile,
+    ensurePtyRunning,
+    hasLiveMode,
+    isBlocked,
+    liveBlockedState.isBlocked,
+    parentBranch,
+    runQuickActionPlan,
+    setAgentModeLikely,
+    clearPendingShellPlan,
+    queueShellPlan
+  ]);
 
-  const handleQuickTestFix = () => {
-    dispatchQuickAction('test_and_fix');
-  };
-
-  const handleQuickResume = () => {
-    dispatchQuickAction('resume');
-  };
-
-  const handleQuickPause = () => {
-    dispatchQuickAction('pause');
-  };
-
-  const handleQuickPlan = () => {
-    dispatchQuickAction('plan');
+  const handleQuickCreatePr = () => {
+    dispatchQuickAction('create_pr');
   };
 
   const injectAgentCommand = (filePath: string) => {
@@ -585,10 +1224,19 @@ const Terminal: React.FC<TerminalProps> = ({
       reader.onload = async (event) => {
         const base64 = event.target?.result as string;
         const filename = `img_${Date.now()}.png`;
-        const res = await window.electronAPI.saveImage(cwd, base64, filename);
-        if (res.success && res.path) {
-          injectAgentCommand(res.path);
+        try {
+          const res = await window.electronAPI.saveImage(cwd, base64, filename);
+          if (res.success && res.path) {
+            injectAgentCommand(res.path);
+          } else {
+            writeOrchestratorHint(res.error || 'Image paste failed: unable to save image to workspace cache.');
+          }
+        } catch (error: any) {
+          writeOrchestratorHint(`Image paste failed: ${error?.message || 'unknown error'}`);
         }
+      };
+      reader.onerror = () => {
+        writeOrchestratorHint('Image paste failed: could not read clipboard image data.');
       };
       reader.readAsDataURL(file);
     }
@@ -602,10 +1250,6 @@ const Terminal: React.FC<TerminalProps> = ({
     }
   };
 
-  const handleQuickStatus = () => {
-    dispatchQuickAction('status');
-  };
-
   return (
     <div className="w-full h-full flex flex-col relative bg-[var(--xterm-bg)] rounded-xl overflow-hidden" onPaste={handlePaste}>
       <div
@@ -617,138 +1261,80 @@ const Terminal: React.FC<TerminalProps> = ({
         <div ref={terminalRef} className="w-full h-full absolute inset-0" />
       </div>
 
-      <div className="p-3 border-t border-[var(--panel-border)] bg-[var(--panel)] flex flex-col shrink-0 relative z-30">
-        {isBlocked && (
-          <div className="mb-3 rounded-lg border border-red-900/70 bg-[#1a0505] px-3 py-2 flex items-center justify-between gap-3">
+      <div className="terminal-action-bar flex flex-col shrink-0 relative z-30">
+        {quickActionNotice && (
+          <div className="terminal-action-notice">
+            {quickActionNotice}
+          </div>
+        )}
+        {effectiveBlocked && (
+          <div className="terminal-blocked-banner mb-2">
             <div className="min-w-0 flex items-center">
               <AlertTriangle size={13} className="text-red-500 mr-2 flex-shrink-0" />
               <span className="text-[11px] text-red-300 font-mono truncate">
-                Action Required: {blockedReason || 'agent is waiting for confirmation.'}
+                Action Required: {effectiveBlockedReason || 'agent is waiting for confirmation.'}
               </span>
             </div>
             <div className="flex items-center space-x-2 flex-shrink-0">
-              <button type="button" tabIndex={-1} onFocus={blurButtonOnFocus} onMouseDown={keepTerminalFocus} onClick={() => sendLine('y', false)} className="btn-primary px-3 py-1.5 rounded text-[11px] font-mono">
+              <button type="button" onMouseDown={keepTerminalFocus} onClick={() => sendLine('y', false)} className="btn-primary px-3 py-1.5 rounded text-[11px] font-mono">
                 approve (y)
               </button>
-              <button type="button" tabIndex={-1} onFocus={blurButtonOnFocus} onMouseDown={keepTerminalFocus} onClick={() => sendLine('n', false)} className="btn-ghost border border-[#262626] px-3 py-1.5 rounded text-[11px] font-mono">
+              <button type="button" onMouseDown={keepTerminalFocus} onClick={() => sendLine('n', false)} className="btn-ghost px-3 py-1.5 rounded text-[11px] font-mono">
                 reject (n)
               </button>
             </div>
           </div>
         )}
 
-        <div className="space-y-1">
-          <div className="flex items-center justify-between gap-2 pb-1">
-            <div className="flex flex-wrap items-center gap-2">
-              {usageSummaryLabel && (
-                <span className="text-[10px] border border-[#1f1f1f] bg-[#0a0a0a] text-[#9ca3af] px-2 py-1 rounded font-mono">
-                  {usageSummaryLabel}
-                </span>
-              )}
-              {usageCostLabel && (
-                <span className="text-[10px] border border-[#1f1f1f] bg-[#0a0a0a] text-[#9ca3af] px-2 py-1 rounded font-mono">
-                  {usageCostLabel}
-                </span>
-              )}
-            </div>
-            {hasUsageBadge && usageUpdatedLabel && (
-              <span className="text-[10px] text-[#6b7280] font-mono">
-                usage {usageUpdatedLabel}
+        <div className="terminal-action-meta">
+          <div className="terminal-action-chips">
+            {usageSummaryLabel && (
+              <span className="terminal-action-chip">
+                {usageSummaryLabel}
+              </span>
+            )}
+            {usageCostLabel && (
+              <span className="terminal-action-chip">
+                {usageCostLabel}
               </span>
             )}
           </div>
+          <div className="terminal-action-updated">
+            {hasUsageBadge && usageUpdatedLabel ? `updated ${usageUpdatedLabel}` : ''}
+          </div>
+        </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="terminal-quick-toolbar">
+          <div className="terminal-quick-group">
             <button
               type="button"
-              tabIndex={-1}
-              onFocus={blurButtonOnFocus}
               onMouseDown={keepTerminalFocus}
-              onClick={handleQuickStatus}
-              title="Request git status snapshot for this task"
-              className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center"
+              onClick={handleQuickCreatePr}
+              title={`Create PR/MR into ${parentBranch || 'main'} and open it in browser`}
+              className="terminal-quick-btn terminal-quick-btn--primary"
             >
-              <TerminalSquare size={12} className="mr-2 text-[#525252]" /> status
+              <GitPullRequest size={12} className="mr-2 shrink-0" /> create PR
+            </button>
+          </div>
+          <div className="terminal-quick-group terminal-quick-group--right">
+            <button
+              type="button"
+              onMouseDown={keepTerminalFocus}
+              onClick={() => onMerge?.(taskId)}
+              title="Review and merge this worktree"
+              className="terminal-quick-btn terminal-quick-btn--merge"
+            >
+              <GitMerge size={12} className="mr-2 shrink-0" /> merge
             </button>
             <button
               type="button"
-              tabIndex={-1}
-              onFocus={blurButtonOnFocus}
               onMouseDown={keepTerminalFocus}
-              onClick={handleQuickResume}
-              title="Continue the current task without restarting context"
-              className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center"
+              onClick={() => onDelete?.(taskId)}
+              title="Delete this branch and worktree"
+              className="terminal-quick-btn terminal-quick-btn--delete"
             >
-              <Play size={12} className="mr-2 text-[#525252]" /> resume
+              <Trash2 size={12} className="mr-2 shrink-0" /> delete
             </button>
-            <button
-              type="button"
-              tabIndex={-1}
-              onFocus={blurButtonOnFocus}
-              onMouseDown={keepTerminalFocus}
-              onClick={handleQuickPause}
-              title="Send Ctrl+C to interrupt current command/agent action"
-              className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center"
-            >
-              <Pause size={12} className="mr-2 text-[#525252]" /> pause
-            </button>
-            <button
-              type="button"
-              tabIndex={-1}
-              onFocus={blurButtonOnFocus}
-              onMouseDown={keepTerminalFocus}
-              onClick={handleQuickTestFix}
-              title="Run relevant checks and fix failures"
-              className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center"
-            >
-              <Code size={12} className="mr-2 text-[#525252]" /> test & fix
-            </button>
-            <button
-              type="button"
-              tabIndex={-1}
-              onFocus={blurButtonOnFocus}
-              onMouseDown={keepTerminalFocus}
-              onClick={handleQuickPlan}
-              title="Create a concise execution plan"
-              className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center"
-            >
-              <Map size={12} className="mr-2 text-[#525252]" /> plan
-            </button>
-            <button
-              type="button"
-              tabIndex={-1}
-              onFocus={blurButtonOnFocus}
-              onMouseDown={keepTerminalFocus}
-              onClick={() => onHandover?.()}
-              title="Hand over this task to another agent model"
-              className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center"
-            >
-              <ArrowRightLeft size={12} className="mr-2 text-[#525252]" /> handover
-            </button>
-            <div className="ml-auto flex items-center gap-2">
-              <button
-                type="button"
-                tabIndex={-1}
-                onFocus={blurButtonOnFocus}
-                onMouseDown={keepTerminalFocus}
-                onClick={() => onMerge?.()}
-                title="Review and merge this worktree"
-                className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center text-emerald-400 hover:text-emerald-300"
-              >
-                <GitMerge size={12} className="mr-2 text-emerald-500" /> merge
-              </button>
-              <button
-                type="button"
-                tabIndex={-1}
-                onFocus={blurButtonOnFocus}
-                onMouseDown={keepTerminalFocus}
-                onClick={() => onDelete?.()}
-                title="Delete this branch and worktree"
-                className="btn-ghost px-3 py-1.5 rounded text-xs font-mono flex items-center text-red-400 hover:text-red-300"
-              >
-                <Trash2 size={12} className="mr-2 text-red-500" /> delete
-              </button>
-            </div>
           </div>
         </div>
       </div>
@@ -756,4 +1342,4 @@ const Terminal: React.FC<TerminalProps> = ({
   );
 };
 
-export default Terminal;
+export default React.memo(Terminal, areTerminalPropsEqual);
