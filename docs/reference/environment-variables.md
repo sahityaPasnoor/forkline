@@ -12,6 +12,27 @@
 | `FORKLINE_CORE_MAX_SSE_CLIENTS` | No | `64` |
 | `FORKLINE_CORE_RATE_LIMIT_PER_MINUTE` | No | `1200` |
 | `FORKLINE_CORE_MAX_PTY_SESSIONS` | No | `256` |
+| `FORKLINE_PTY_PERSISTENCE_MODE` | No | `auto` |
+| `FORKLINE_DEPENDENCY_AUTOINSTALL` | No | unset (`off`) |
+| `FORKLINE_PNPM_AUTOINSTALL` | No | unset (`off`) |
+| `FORKLINE_DEPENDENCY_HYDRATION_MODE` | No | `background` |
+
+Notes:
+
+- `FORKLINE_PTY_PERSISTENCE_MODE=auto|tmux|off` controls tmux-backed PTY session persistence.
+- `FORKLINE_DEPENDENCY_AUTOINSTALL=1` enables polyglot worktree hydration for new worktrees.
+- `FORKLINE_PNPM_AUTOINSTALL=1` remains supported as a compatibility alias for enabling hydration.
+- `FORKLINE_DEPENDENCY_HYDRATION_MODE=background|blocking` controls whether hydration blocks worktree creation.
+
+## GUI runtime
+
+| Variable | Required | Default |
+|---|---|---|
+| `FORKLINE_KEEP_BACKGROUND_SERVICES` | No | `1` |
+
+Notes:
+
+- When `FORKLINE_KEEP_BACKGROUND_SERVICES=1`, closing all GUI windows keeps orchestration services alive for reattach.
 
 ## TUI client
 

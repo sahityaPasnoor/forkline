@@ -7,6 +7,7 @@ Base URL: `http://127.0.0.1:<dynamic-port>`
 Route template:
 
 - `POST /api/task/:taskId/:action`
+- `GET /api/approval/:requestId`
 
 Allowed actions:
 
@@ -38,10 +39,12 @@ These emit IPC events to renderer and return immediate `200`.
 
 - `merge`
 
-This creates an approval request and waits for UI decision.
+This creates an approval request and returns a pollable handle.
 
-- timeout: 60 seconds
-- timeout result: `408`
+- immediate result: `202` with `requestId` and `pollUrl`
+- approval state is persisted, so pending requests survive Electron restart
+- poll `GET /api/approval/:requestId` until status changes from `pending`
+- optional legacy wait mode: add `?wait=1` to `/merge` to keep the request open (timeout: 10 minutes, returns `408`)
 
 ## Example: update todos
 
@@ -59,6 +62,17 @@ Success:
 
 ```json
 { "success": true }
+```
+
+Merge queued:
+
+```json
+{
+  "success": true,
+  "status": "pending",
+  "requestId": "1700000000000-abc123",
+  "pollUrl": "http://127.0.0.1:34567/api/approval/1700000000000-abc123"
+}
 ```
 
 Unauthorized:

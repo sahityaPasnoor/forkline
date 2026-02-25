@@ -36,19 +36,13 @@ Forkline's unique wedge: **local-first, model-agnostic, worktree-native multi-ag
 - Automatic worktree spawn per task with branch safety checks
 - Per-task terminal sessions with PTY restore after UI refresh/restart
 - Blocked prompt detection and operator approval flow
+- Global approval inbox for batch approve/reject and blocked prompt responses
 - Fleet persistence (projects/tasks/events/sessions)
-- Quick actions (`status`, `resume`, `pause`, `test & fix`, `plan`, `handover`, `merge`, `delete`)
-- Per-workspace context + MCP config injection
+- Prompt forensics timeline with transcript replay in Fleet dashboard
+- Quick actions (`create PR`, `merge`, `delete`)
+- Per-task Living Spec override with drift alerts when edits diverge from expected stack
 - Parent-branch selection when spawning tasks
-
-## Current MCP Behavior
-
-MCP is centralized in workspace settings and surfaced in spawn/runtime UX.
-
-- Native launch wiring: `Claude`
-- Explicitly unsupported (currently warned in UI/runtime): `Aider`, `Gemini`, `Codex`, `Amp`, `Cursor`, `Cline`, `Sweep`, generic shell
-
-If MCP is enabled globally but not supported by the selected agent, Forkline informs the user and launches without MCP flags.
+- Polyglot worktree hydration (`pnpm`/`npm`/`yarn`/`bun`/`uv`/`pip`/`go`/`cargo`) when auto-install is enabled
 
 ## Security Model (Implemented)
 

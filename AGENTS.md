@@ -2,6 +2,14 @@
 
 Repository-specific rules for Codex agents working in this project.
 
+## Testing
+Make sure to write test cases for every implementation in core. An integration test for all the features which you are implementing.
+
+Behavior-first rule (applies to all features):
+1. Define expected behavior and edge cases first (happy path + failure path + state transition path).
+2. Encode those expectations in tests/fixtures (not implementation-shaped assertions).
+3. Run tests, then fix code until behavior matches expectations.
+4. If tests pass but user-visible behavior is wrong, treat tests as incomplete and update them before shipping.
 ## Project Snapshot
 - Product: `Forkline` (local-first multi-agent orchestration platform).
 - Runtime split:

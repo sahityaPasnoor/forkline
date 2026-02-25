@@ -38,6 +38,8 @@
     "security:audit": "npm audit",
     "security:audit:prod": "npm audit --omit=dev",
     "security:smoke": "node scripts/security-smoke.js",
+    "audit:css": "node scripts/css-hardcode-audit.js",
+    "test:pty-replay": "node scripts/pty-replay-harness.js",
     "preflight:release": "npm run security:audit && npm run security:smoke && npm run typecheck && npm run build && node scripts/release-preflight.js",
     "dev": "node scripts/run-dev.js",
     "dev:internal": "concurrently -k \"vite\" \"npm:dev:electron:watch\" \"npm:dev:electron:run\"",
