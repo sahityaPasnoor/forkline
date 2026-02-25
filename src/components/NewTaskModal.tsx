@@ -14,6 +14,7 @@ interface NewTaskModalProps {
       createBaseBranchIfMissing?: boolean;
       dependencyCloneMode?: 'copy_on_write' | 'full_copy';
       livingSpecOverridePath?: string;
+      launchCommandOverride?: string;
     }
   ) => void;
   projectName: string;
@@ -27,6 +28,61 @@ interface NewTaskModalProps {
 }
 
 const PARENT_BRANCH_PATTERN = /^[a-zA-Z0-9._/-]{1,120}$/;
+type LaunchMode = 'new' | 'resume';
+type ResumeProvider = 'claude' | 'gemini' | 'amp' | 'codex' | 'other';
+type ResumeChoice = 'latest' | 'picker' | 'manual' | 'session';
+
+interface AgentSessionOption {
+  id: string;
+  label: string;
+  resumeArg?: string;
+}
+
+const shellQuote = (value: string) => `'${String(value || '').replace(/'/g, `'\"'\"'`)}'`;
+
+const resolveResumeProvider = (command: string): ResumeProvider => {
+  const normalized = String(command || '').trim().toLowerCase();
+  if (normalized.includes('claude')) return 'claude';
+  if (normalized.includes('gemini')) return 'gemini';
+  if (normalized.includes('amp')) return 'amp';
+  if (normalized.includes('codex')) return 'codex';
+  return 'other';
+};
+
+const buildResumeCommand = (
+  provider: ResumeProvider,
+  choice: ResumeChoice,
+  selectedSession: AgentSessionOption | null,
+  manualSessionId: string
+) => {
+  if (provider === 'gemini') {
+    if (choice === 'latest') return 'gemini --resume latest';
+    if (choice === 'session' && selectedSession?.resumeArg) return `gemini --resume ${shellQuote(selectedSession.resumeArg)}`;
+    return null;
+  }
+
+  if (provider === 'amp') {
+    if (choice === 'latest') return 'amp threads continue --last';
+    if (choice === 'session' && selectedSession?.id) return `amp threads continue ${shellQuote(selectedSession.id)}`;
+    return null;
+  }
+
+  if (provider === 'claude') {
+    if (choice === 'latest') return 'claude --continue';
+    if (choice === 'picker') return 'claude --resume';
+    if (choice === 'manual' && manualSessionId.trim()) return `claude --resume ${shellQuote(manualSessionId.trim())}`;
+    return null;
+  }
+
+  if (provider === 'codex') {
+    if (choice === 'latest') return 'codex resume --last';
+    if (choice === 'picker') return 'codex resume';
+    if (choice === 'manual' && manualSessionId.trim()) return `codex resume ${shellQuote(manualSessionId.trim())}`;
+    return null;
+  }
+
+  return null;
+};
 
 const NewTaskModal: React.FC<NewTaskModalProps> = ({
   isOpen,
@@ -36,7 +92,6 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
   basePath,
   parentBranch,
   availableBranches,
-  livingSpecCandidates,
   dependencyCloneMode,
   defaultCommand,
   availableAgents
@@ -50,6 +105,15 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
   const [parentBranchError, setParentBranchError] = useState('');
   const [selectedDependencyCloneMode, setSelectedDependencyCloneMode] = useState<'copy_on_write' | 'full_copy'>(dependencyCloneMode);
   const [livingSpecOverridePath, setLivingSpecOverridePath] = useState('');
+  const [launchMode, setLaunchMode] = useState<LaunchMode>('new');
+  const [resumeProvider, setResumeProvider] = useState<ResumeProvider>(resolveResumeProvider(defaultCommand));
+  const [resumeChoice, setResumeChoice] = useState<ResumeChoice>('latest');
+  const [sessionOptions, setSessionOptions] = useState<AgentSessionOption[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState('');
+  const [manualSessionId, setManualSessionId] = useState('');
+  const [supportsInAppList, setSupportsInAppList] = useState(false);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionError, setSessionError] = useState('');
   const [prompt, setPrompt] = useState('');
   const [autoMerge, setAutoMerge] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
@@ -68,10 +132,70 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
       setParentBranchError('');
       setSelectedDependencyCloneMode(dependencyCloneMode);
       setLivingSpecOverridePath('');
+      setLaunchMode('new');
+      setResumeProvider(resolveResumeProvider(validCommand));
+      setResumeChoice('latest');
+      setSessionOptions([]);
+      setSelectedSessionId('');
+      setManualSessionId('');
+      setSupportsInAppList(false);
+      setSessionsLoading(false);
+      setSessionError('');
       setIsStarting(false);
     }
     wasOpenRef.current = isOpen;
   }, [isOpen, projectName, defaultCommand, availableAgents, parentBranch, availableBranches, dependencyCloneMode]);
+
+  useEffect(() => {
+    if (!isOpen || launchMode !== 'resume') return;
+    const provider = resolveResumeProvider(command);
+    setResumeProvider(provider);
+    if (provider === 'other') {
+      setSupportsInAppList(false);
+      setSessionOptions([]);
+      setSelectedSessionId('');
+      setSessionError('Resume is available for Claude, Gemini, Amp, and Codex.');
+      return;
+    }
+
+    let cancelled = false;
+    const fetchSessions = async () => {
+      setSessionsLoading(true);
+      setSessionError('');
+      const response = await window.electronAPI.listAgentSessions(command, basePath);
+      if (cancelled) return;
+      setSupportsInAppList(!!response.supportsInAppList);
+      if (response.provider) {
+        setResumeProvider(response.provider);
+      }
+      if (!response.success) {
+        setSessionOptions([]);
+        setSelectedSessionId('');
+        setSessionError(response.error || 'Unable to load provider sessions.');
+        setSessionsLoading(false);
+        return;
+      }
+
+      const sessions = Array.isArray(response.sessions) ? response.sessions : [];
+      setSessionOptions(sessions);
+      if (response.supportsInAppList) {
+        setResumeChoice(sessions.length > 0 ? 'session' : 'latest');
+      } else if (provider === 'claude' || provider === 'codex') {
+        setResumeChoice('latest');
+      }
+      setSelectedSessionId((prev) => (
+        prev && sessions.some((session) => session.id === prev)
+          ? prev
+          : (sessions[0]?.id || '')
+      ));
+      setSessionsLoading(false);
+    };
+
+    void fetchSessions();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, launchMode, command, basePath]);
 
   if (!isOpen) return null;
 
@@ -90,11 +214,24 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
       }
     }
     setParentBranchError('');
+
+    let launchCommandOverride: string | undefined;
+    if (launchMode === 'resume') {
+      const selectedSession = sessionOptions.find((session) => session.id === selectedSessionId) || null;
+      const resumeCommand = buildResumeCommand(resumeProvider, resumeChoice, selectedSession, manualSessionId);
+      if (!resumeCommand) {
+        setSessionError('Select a valid session resume target.');
+        return;
+      }
+      launchCommandOverride = resumeCommand;
+    }
+
     setIsStarting(true);
-    onSubmit(taskName, selectedCommand, prompt, selectedParentBranch, { autoMerge }, {
+    onSubmit(taskName, selectedCommand, launchMode === 'resume' ? '' : prompt, selectedParentBranch, { autoMerge }, {
       createBaseBranchIfMissing: parentBranchMode === 'new',
       dependencyCloneMode: selectedDependencyCloneMode,
-      livingSpecOverridePath: livingSpecOverridePath || undefined
+      livingSpecOverridePath: livingSpecOverridePath || undefined,
+      launchCommandOverride
     });
     setPrompt('');
     onClose();
@@ -146,6 +283,141 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                 ))}
               </select>
             </div>
+          </div>
+
+          <div className="rounded-lg border border-[#1f1f1f] bg-[#070707] p-3 space-y-3">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-[#737373] font-mono">Launch Mode</div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setLaunchMode('new')}
+                className={`btn-ghost px-3 py-1 rounded text-[10px] font-mono ${
+                  launchMode === 'new'
+                    ? 'border-[var(--input-border-focus)] text-[var(--text-primary)] bg-[var(--panel-strong)]'
+                    : ''
+                }`}
+              >
+                Start New Session
+              </button>
+              <button
+                type="button"
+                onClick={() => setLaunchMode('resume')}
+                className={`btn-ghost px-3 py-1 rounded text-[10px] font-mono ${
+                  launchMode === 'resume'
+                    ? 'border-[var(--input-border-focus)] text-[var(--text-primary)] bg-[var(--panel-strong)]'
+                    : ''
+                }`}
+              >
+                Resume Existing
+              </button>
+            </div>
+            {launchMode === 'resume' && (
+              <div className="space-y-2">
+                <div className="text-[11px] text-[#d4d4d8] font-mono">
+                  Provider: <span className="text-white">{resumeProvider}</span>
+                </div>
+                {sessionsLoading && (
+                  <div className="text-[10px] text-[#9ca3af] font-mono">Loading available sessions...</div>
+                )}
+                {sessionError && (
+                  <div className="text-[10px] text-rose-300 font-mono">{sessionError}</div>
+                )}
+                {!sessionsLoading && supportsInAppList && (
+                  <>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => setResumeChoice('session')}
+                        className={`btn-ghost px-2 py-1 rounded text-[10px] font-mono ${
+                          resumeChoice === 'session'
+                            ? 'border-[var(--input-border-focus)] text-[var(--text-primary)] bg-[var(--panel-strong)]'
+                            : ''
+                        }`}
+                      >
+                        Pick Session
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setResumeChoice('latest')}
+                        className={`btn-ghost px-2 py-1 rounded text-[10px] font-mono ${
+                          resumeChoice === 'latest'
+                            ? 'border-[var(--input-border-focus)] text-[var(--text-primary)] bg-[var(--panel-strong)]'
+                            : ''
+                        }`}
+                      >
+                        Use Latest
+                      </button>
+                    </div>
+                    {resumeChoice === 'session' && (
+                      <select
+                        value={selectedSessionId}
+                        onChange={(e) => setSelectedSessionId(e.target.value)}
+                        className="w-full input-stealth rounded py-1.5 px-2 text-[11px] font-mono appearance-none"
+                        style={{ backgroundImage: 'url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org/2000/svg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23525252%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right .7em top 50%', backgroundSize: '.65em auto' }}
+                      >
+                        {sessionOptions.length === 0 && (
+                          <option value="">No sessions found for this project</option>
+                        )}
+                        {sessionOptions.map((session) => (
+                          <option key={session.id} value={session.id}>{session.label}</option>
+                        ))}
+                      </select>
+                    )}
+                  </>
+                )}
+                {!sessionsLoading && !supportsInAppList && (resumeProvider === 'claude' || resumeProvider === 'codex') && (
+                  <>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => setResumeChoice('latest')}
+                        className={`btn-ghost px-2 py-1 rounded text-[10px] font-mono ${
+                          resumeChoice === 'latest'
+                            ? 'border-[var(--input-border-focus)] text-[var(--text-primary)] bg-[var(--panel-strong)]'
+                            : ''
+                        }`}
+                      >
+                        Use Latest
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setResumeChoice('picker')}
+                        className={`btn-ghost px-2 py-1 rounded text-[10px] font-mono ${
+                          resumeChoice === 'picker'
+                            ? 'border-[var(--input-border-focus)] text-[var(--text-primary)] bg-[var(--panel-strong)]'
+                            : ''
+                        }`}
+                      >
+                        Open Picker In Terminal
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setResumeChoice('manual')}
+                        className={`btn-ghost px-2 py-1 rounded text-[10px] font-mono ${
+                          resumeChoice === 'manual'
+                            ? 'border-[var(--input-border-focus)] text-[var(--text-primary)] bg-[var(--panel-strong)]'
+                            : ''
+                        }`}
+                      >
+                        Manual Session ID
+                      </button>
+                    </div>
+                    {resumeChoice === 'manual' && (
+                      <input
+                        type="text"
+                        value={manualSessionId}
+                        onChange={(e) => setManualSessionId(e.target.value)}
+                        className="w-full input-stealth rounded py-1.5 px-2 text-[11px] font-mono"
+                        placeholder="Paste provider session id/name"
+                      />
+                    )}
+                  </>
+                )}
+                <div className="text-[10px] text-[#9ca3af] font-mono">
+                  Resume selections are ephemeral. Forkline does not store provider session catalogs or aliases.
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="rounded-lg border border-[#1f1f1f] bg-[#070707] p-3 space-y-3">
@@ -230,22 +502,6 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                 <option value="full_copy">Use full copies (more disk usage)</option>
               </select>
             </div>
-            <div>
-              <label className="block text-[10px] font-bold text-[#737373] uppercase tracking-[0.2em] mb-1">Task Spec Source (Optional)</label>
-              <select
-                value={livingSpecOverridePath}
-                onChange={(e) => setLivingSpecOverridePath(e.target.value)}
-                className="w-full input-stealth rounded py-1.5 px-2 text-[11px] font-mono appearance-none"
-                style={{ backgroundImage: 'url(\"data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org/2000/svg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23525252%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E\")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right .7em top 50%', backgroundSize: '.65em auto' }}
-              >
-                <option value="">Use project Living Spec preference</option>
-                {livingSpecCandidates.map((candidate) => (
-                  <option key={candidate.path} value={candidate.path}>
-                    {candidate.path}
-                  </option>
-                ))}
-              </select>
-            </div>
           </div>
 
           <div>
@@ -253,9 +509,15 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
             <textarea 
               value={prompt}
               onChange={e => setPrompt(e.target.value)}
-              placeholder="e.g. Refactor the auth component..."
+              placeholder={launchMode === 'resume' ? 'Ignored for resume mode. Add instructions after the session opens.' : 'e.g. Refactor the auth component...'}
               className="w-full h-24 input-stealth rounded p-3 text-xs"
+              disabled={launchMode === 'resume'}
             />
+            {launchMode === 'resume' && (
+              <div className="mt-1 text-[10px] text-[#9ca3af] font-mono">
+                Resume mode opens an existing provider session. Enter follow-up instructions inside the terminal after attach.
+              </div>
+            )}
           </div>
 
           <details className="border-t border-[#1a1a1a] pt-4">

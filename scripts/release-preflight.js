@@ -36,7 +36,6 @@ const run = () => {
   assertExists('dist/electron/main.js', 'Electron main build output');
   assertExists('dist/electron/preload.js', 'Electron preload build output');
   assertExists('packages/core/bin/forkline-core.js', 'Core CLI entry');
-  assertExists('packages/tui/bin/forkline-tui.js', 'TUI CLI entry');
   assertExists('bin/forkline.js', 'GUI CLI entry');
 
   const rootFiles = packageJson.files || [];
@@ -46,10 +45,10 @@ const run = () => {
   assertArrayIncludes(electronFiles, 'packages/**/*', 'electron-builder build.files');
   assertArrayIncludes(electronFiles, 'bin/**/*', 'electron-builder build.files');
 
-  if (!packageJson.bin?.forkline || !packageJson.bin?.['forkline-core'] || !packageJson.bin?.['forkline-tui']) {
-    fail('bin entries must include forkline, forkline-core, and forkline-tui');
+  if (!packageJson.bin?.forkline || !packageJson.bin?.['forkline-core']) {
+    fail('bin entries must include forkline and forkline-core');
   }
-  ok('bin entries include forkline, forkline-core, and forkline-tui');
+  ok('bin entries include forkline and forkline-core');
 
   process.stdout.write('[preflight] Checking npm tarball includes runtime modules...\n');
   const npmPack = spawnSync('npm', ['pack', '--dry-run'], {
@@ -62,7 +61,6 @@ const run = () => {
   const npmPackOutput = `${npmPack.stdout || ''}\n${npmPack.stderr || ''}`;
   const requiredTarballPaths = [
     'packages/core/src/services/pty-service.js',
-    'packages/tui/src/index.js',
     'packages/protocol/src/quick-actions.js',
     'bin/forkline.js'
   ];

@@ -47,7 +47,7 @@ export const detectAgentCapabilities = (agentCommand: string): AgentCapabilities
   if (normalized.includes('aider')) {
     return { profile: 'aider', supportsAsk: true, supportsRun: true };
   }
-  if (/(claude|codex|gemini|amp|cursor|cline|sweep)/.test(normalized)) {
+  if (/(claude|codex|gemini|amp)/.test(normalized)) {
     return { profile: 'prompt', supportsAsk: false, supportsRun: false };
   }
   return { profile: 'shell', supportsAsk: false, supportsRun: false };

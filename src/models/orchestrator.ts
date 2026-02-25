@@ -19,6 +19,7 @@ export interface TaskTab {
   parentBranch?: string;
   parentTaskId?: string;
   prompt?: string;
+  launchCommandOverride?: string;
   livingSpecOverridePath?: string;
   capabilities?: AgentCapabilities;
   hasBootstrapped?: boolean;

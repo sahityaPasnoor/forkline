@@ -19,11 +19,11 @@
   "main": "dist/electron/main.js",
   "bin": {
     "forkline": "bin/forkline.js",
-    "forkline-core": "packages/core/bin/forkline-core.js",
-    "forkline-tui": "packages/tui/bin/forkline-tui.js"
+    "forkline-core": "packages/core/bin/forkline-core.js"
   },
   "files": [
     "dist/**/*",
+    "config/**/*",
     "bin/**/*",
     "packages/**/*",
     "LICENSE",
@@ -47,8 +47,6 @@
     "dev:electron:watch": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
     "dev:electron:run": "node scripts/run-electron-dev.js",
     "core:start": "node packages/core/bin/forkline-core.js",
-    "tui:start": "npm run tui:start:experimental",
-    "tui:start:experimental": "node packages/tui/bin/forkline-tui.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
@@ -99,6 +97,7 @@
     },
     "files": [
       "dist/**/*",
+      "config/**/*",
       "packages/**/*",
       "bin/**/*",
       "LICENSE",
@@ -106,17 +105,20 @@
       "package.json"
     ],
     "mac": {
+      "icon": "public/logo.icns",
       "target": [
         "zip"
       ],
       "category": "public.app-category.developer-tools"
     },
     "win": {
+      "icon": "public/logo.ico",
       "target": [
         "nsis"
       ]
     },
     "linux": {
+      "icon": "public/logo.png",
       "target": [
         "AppImage",
         "deb"

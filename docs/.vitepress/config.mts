@@ -6,12 +6,13 @@ export default {
   title: 'Forkline',
   description: 'Local-first orchestration platform for running coding agents in isolated Git worktrees.',
   lang: 'en-US',
+  appearance: 'dark',
   base,
   cleanUrls: true,
   lastUpdated: true,
   metaChunk: true,
   head: [
-    ['meta', { name: 'theme-color', content: '#0b1523' }],
+    ['meta', { name: 'theme-color', content: '#090d14' }],
     ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
     ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
     ['link', { rel: 'icon', href: '/logo.svg' }]
@@ -19,11 +20,10 @@ export default {
   themeConfig: {
     logo: '/logo.svg',
     nav: [
-      { text: 'Guide', link: '/guide/getting-started' },
+      { text: 'Getting Started', link: '/guide/getting-started' },
+      { text: 'How To Use', link: '/guide/how-to-use' },
       { text: 'Architecture', link: '/architecture/overview' },
-      { text: 'API', link: '/reference/core-api' },
-      { text: 'Operations', link: '/operations/security' },
-      { text: 'Contributing', link: '/community/contributing' }
+      { text: 'Core API', link: '/reference/core-api' }
     ],
     sidebar: {
       '/guide/': [
@@ -31,10 +31,7 @@ export default {
           text: 'Guide',
           items: [
             { text: 'Getting Started', link: '/guide/getting-started' },
-            { text: 'Developer Workflow', link: '/guide/developer-workflow' },
-            { text: 'Configuration', link: '/guide/configuration' },
-            { text: 'Theme Decision', link: '/guide/theme-options' },
-            { text: 'Troubleshooting', link: '/guide/troubleshooting' }
+            { text: 'How To Use', link: '/guide/how-to-use' }
           ]
         }
       ],
@@ -42,9 +39,7 @@ export default {
         {
           text: 'Architecture',
           items: [
-            { text: 'Overview', link: '/architecture/overview' },
-            { text: 'Package Boundaries', link: '/architecture/packages' },
-            { text: 'Runtime Flows', link: '/architecture/runtime-flows' }
+            { text: 'Overview', link: '/architecture/overview' }
           ]
         }
       ],
@@ -52,35 +47,7 @@ export default {
         {
           text: 'API Reference',
           items: [
-            { text: 'Core API', link: '/reference/core-api' },
-            { text: 'Agent Control API', link: '/reference/agent-control-api' },
-            { text: 'Protocol API', link: '/reference/protocol-api' },
-            { text: 'TUI API (Experimental)', link: '/reference/tui-api' },
-            { text: 'Event Model', link: '/reference/events' },
-            { text: 'Quick Actions', link: '/reference/quick-actions' },
-            { text: 'Environment Variables', link: '/reference/environment-variables' },
-            { text: 'Renderer IPC (Internal)', link: '/reference/renderer-ipc-internal' }
-          ]
-        }
-      ],
-      '/operations/': [
-        {
-          text: 'Operations',
-          items: [
-            { text: 'Security', link: '/operations/security' },
-            { text: 'Release Process', link: '/operations/release' },
-            { text: 'CI/CD and Quality Gates', link: '/operations/ci-cd' },
-            { text: 'Open-Source Readiness Audit (2026-02)', link: '/operations/audits/open-source-readiness-2026-02' }
-          ]
-        }
-      ],
-      '/community/': [
-        {
-          text: 'Community',
-          items: [
-            { text: 'Contributing', link: '/community/contributing' },
-            { text: 'Open Source Standards', link: '/community/open-source-standards' },
-            { text: 'Docs Style Guide', link: '/community/docs-style-guide' }
+            { text: 'Core API', link: '/reference/core-api' }
           ]
         }
       ]

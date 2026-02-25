@@ -517,6 +517,43 @@ export class FleetStore {
     }));
   }
 
+  public removeProject(basePath: string) {
+    const normalizedBasePath = String(basePath || '').trim();
+    if (!normalizedBasePath) {
+      return { removedProject: false, removedTasks: 0 };
+    }
+
+    const db = this.requireDb();
+    const existingProject = this.queryOne('SELECT base_path AS basePath FROM projects WHERE base_path = ?', [normalizedBasePath]);
+    const taskRows = this.queryAll(
+      'SELECT task_id AS taskId FROM tasks WHERE base_path = ?',
+      [normalizedBasePath]
+    );
+    const taskIds = Array.from(new Set(taskRows
+      .map((row) => (typeof row.taskId === 'string' ? row.taskId.trim() : ''))
+      .filter(Boolean)));
+
+    if (taskIds.length > 0) {
+      const placeholders = taskIds.map(() => '?').join(', ');
+      db.run(`DELETE FROM task_transcript WHERE task_id IN (${placeholders})`, taskIds);
+      db.run(`DELETE FROM task_events WHERE task_id IN (${placeholders})`, taskIds);
+      db.run(`DELETE FROM task_sessions WHERE task_id IN (${placeholders})`, taskIds);
+      db.run(`DELETE FROM tasks WHERE task_id IN (${placeholders})`, taskIds);
+
+      const removedTaskSet = new Set(taskIds);
+      for (const [runtimeTaskId, canonicalTaskId] of this.runtimeTaskToCanonicalTask.entries()) {
+        if (!removedTaskSet.has(runtimeTaskId) && !removedTaskSet.has(canonicalTaskId)) continue;
+        this.runtimeTaskToCanonicalTask.delete(runtimeTaskId);
+        this.runtimeTaskToSession.delete(runtimeTaskId);
+        this.lastActivityFlushAt.delete(runtimeTaskId);
+      }
+    }
+
+    db.run('DELETE FROM projects WHERE base_path = ?', [normalizedBasePath]);
+    this.schedulePersist();
+    return { removedProject: !!existingProject, removedTasks: taskIds.length };
+  }
+
   public listTasks(options: FleetListTasksOptions = {}) {
     const params: SqlPrimitive[] = [];
     const where: string[] = [];

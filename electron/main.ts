@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, session, clipboard, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, session, clipboard, shell, nativeImage } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { execFile } from 'child_process';
@@ -7,6 +7,7 @@ import { PtyManager } from './ptyManager';
 import { GitManager } from './gitManager';
 import { AgentControlServer } from './agentServer';
 import { FleetStore, type FleetListTasksOptions, type FleetTaskPayload } from './fleetStore';
+import { loadAppBranding } from './branding';
 const {
   collectAgenticSpecCandidates,
   sanitizeLivingSpecPreference,
@@ -24,6 +25,7 @@ let fleetStore: FleetStore | null = null;
 let runtimeSessionState: any | null = null;
 let runtimeSessionFile: string | null = null;
 let detectedAgentsCache: { data: Array<{name: string; command: string; version: string}>; ts: number } | null = null;
+const appBranding = loadAppBranding();
 
 const MAX_TEXT_FILE_BYTES = 256_000;
 const MAX_IMAGE_FILE_BYTES = 10_000_000;
@@ -35,6 +37,56 @@ const MAX_EXTERNAL_URL_BYTES = 2048;
 const WORKTREE_BASENAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
 const FILENAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
 type WorkspaceLivingSpecPreference = { mode: 'single' | 'consolidated'; selectedPath?: string };
+type AgentSessionProvider = 'claude' | 'gemini' | 'amp' | 'codex' | 'other';
+
+const resolveAppIconPath = () => {
+  const brandingIconFile = appBranding.appIconFile.replace(/\\/g, '/').replace(/^\/+/, '');
+  const brandingLogoFile = appBranding.logoFile.replace(/\\/g, '/').replace(/^\/+/, '');
+  const iconBasePath = brandingIconFile.replace(/\.(svg|png|icns|ico)$/i, '');
+  const logoBasePath = brandingLogoFile.replace(/\.(svg|png|icns|ico)$/i, '');
+  const preferredExtOrder = process.platform === 'darwin'
+    ? ['.icns', '.png', '.ico']
+    : ['.png', '.ico', '.icns'];
+  const brandingIconCandidates = Array.from(new Set([
+    ...preferredExtOrder.map((ext) => `${iconBasePath}${ext}`),
+    ...preferredExtOrder.map((ext) => `${logoBasePath}${ext}`),
+    brandingIconFile,
+    brandingLogoFile
+  ])).filter(Boolean);
+  const candidates = [
+    ...brandingIconCandidates.flatMap((file) => ([
+      path.join(__dirname, `../${file}`),
+      path.join(__dirname, `../../public/${file}`),
+      path.join(process.cwd(), `public/${file}`)
+    ])),
+    path.join(__dirname, '../logo.png'),
+    path.join(__dirname, '../../public/logo.png'),
+    path.join(process.cwd(), 'public/logo.png')
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      const ext = path.extname(candidate).toLowerCase();
+      if (ext === '.png' || ext === '.ico' || ext === '.icns') {
+        return candidate;
+      }
+    } catch {
+      // Ignore unreadable paths and continue searching.
+    }
+  }
+  return undefined;
+};
+
+const applyAppIcon = (iconPath: string | undefined) => {
+  if (process.platform !== 'darwin' || !app.dock || !iconPath) return;
+  try {
+    const icon = nativeImage.createFromPath(iconPath);
+    if (icon.isEmpty()) return;
+    app.dock.setIcon(icon);
+  } catch {
+    // Ignore icon load failures and continue startup.
+  }
+};
 
 const resolveSafeWorktreePath = (rawPath: unknown): string | null => {
   if (typeof rawPath !== 'string') return null;
@@ -90,6 +142,59 @@ const clampString = (value: unknown, maxChars: number) => {
   const trimmed = value.trim();
   if (!trimmed) return '';
   return trimmed.slice(0, maxChars);
+};
+
+const stripAnsi = (value: string) => value.replace(/\x1b\[[0-9;?<=>]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\u0007]*(?:\u0007|\x1b\\)/g, '');
+
+const resolveSessionProvider = (command: unknown): AgentSessionProvider => {
+  const normalized = clampString(command, 256).toLowerCase();
+  if (!normalized) return 'other';
+  if (normalized.includes('claude')) return 'claude';
+  if (normalized.includes('gemini')) return 'gemini';
+  if (normalized.includes('amp')) return 'amp';
+  if (normalized.includes('codex')) return 'codex';
+  return 'other';
+};
+
+const parseGeminiSessionList = (stdout: string) => {
+  const sessions: Array<{ id: string; label: string; resumeArg?: string }> = [];
+  const lines = stripAnsi(stdout || '').split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const match = line.match(/^(\d+)\.\s+(.+?)\s+\[([0-9a-fA-F-]{8,})\]$/);
+    if (!match) continue;
+    const index = match[1];
+    const title = match[2].trim();
+    const sessionId = match[3].trim();
+    sessions.push({
+      id: sessionId,
+      resumeArg: index,
+      label: `${title} [${sessionId}]`
+    });
+  }
+  return sessions;
+};
+
+const parseAmpSessionList = (stdout: string) => {
+  const sessions: Array<{ id: string; label: string; resumeArg?: string }> = [];
+  const lines = stripAnsi(stdout || '').split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('Title ') || line.startsWith('─')) continue;
+    const idMatch = line.match(/\b(T-[A-Za-z0-9-]+)\b/);
+    if (!idMatch) continue;
+    const sessionId = idMatch[1];
+    const columns = line.split(/\s{2,}/).map((value) => value.trim()).filter(Boolean);
+    const title = columns[0] || sessionId;
+    const updated = columns.length >= 2 ? columns[1] : '';
+    sessions.push({
+      id: sessionId,
+      resumeArg: sessionId,
+      label: updated ? `${title} (${updated})` : title
+    });
+  }
+  return sessions;
 };
 
 const sanitizePathString = (value: unknown) => {
@@ -173,7 +278,7 @@ const safeWriteJson = (targetPath: string, data: unknown, maxBytes: number) => {
   fs.writeFileSync(targetPath, raw);
 };
 
-app.setName('Forkline');
+app.setName(appBranding.name);
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
@@ -243,9 +348,14 @@ function createWindow() {
     return;
   }
 
+  const appIconPath = resolveAppIconPath();
+  applyAppIcon(appIconPath);
+
   mainWindow = new BrowserWindow({
+    title: appBranding.name,
     width: 1200,
     height: 800,
+    icon: appIconPath,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -287,6 +397,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  applyAppIcon(resolveAppIconPath());
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
     callback(false);
   });
@@ -390,6 +501,80 @@ app.whenReady().then(async () => {
     return agentServer.listPendingRequests();
   });
 
+  ipcMain.handle('app:listAgentSessions', async (_event, {
+    agentCommand,
+    projectPath
+  }: { agentCommand?: string; projectPath?: string }) => {
+    const provider = resolveSessionProvider(agentCommand || '');
+    const safeProjectPath = resolveSafeProjectPath(projectPath) || process.cwd();
+
+    if (provider === 'claude' || provider === 'codex') {
+      return {
+        success: true,
+        provider,
+        supportsInAppList: false,
+        sessions: []
+      };
+    }
+
+    if (provider === 'gemini') {
+      try {
+        const { stdout, stderr } = await execFileAsync('gemini', ['--list-sessions'], {
+          cwd: safeProjectPath,
+          timeout: 8_000,
+          maxBuffer: 1_000_000
+        });
+        const sessions = parseGeminiSessionList(`${stdout || ''}\n${stderr || ''}`);
+        return {
+          success: true,
+          provider,
+          supportsInAppList: true,
+          sessions
+        };
+      } catch (error: any) {
+        return {
+          success: false,
+          provider,
+          supportsInAppList: true,
+          sessions: [],
+          error: error?.message || 'Unable to list Gemini sessions.'
+        };
+      }
+    }
+
+    if (provider === 'amp') {
+      try {
+        const { stdout, stderr } = await execFileAsync('amp', ['threads', 'list'], {
+          cwd: safeProjectPath,
+          timeout: 8_000,
+          maxBuffer: 1_000_000
+        });
+        const sessions = parseAmpSessionList(`${stdout || ''}\n${stderr || ''}`);
+        return {
+          success: true,
+          provider,
+          supportsInAppList: true,
+          sessions
+        };
+      } catch (error: any) {
+        return {
+          success: false,
+          provider,
+          supportsInAppList: true,
+          sessions: [],
+          error: error?.message || 'Unable to list Amp sessions.'
+        };
+      }
+    }
+
+    return {
+      success: true,
+      provider,
+      supportsInAppList: false,
+      sessions: []
+    };
+  });
+
   ipcMain.handle('app:detectAgents', async () => {
     const now = Date.now();
     const cacheTtlMs = 5 * 60 * 1000;
@@ -397,7 +582,8 @@ app.whenReady().then(async () => {
       return detectedAgentsCache.data;
     }
 
-    const knownAgents = ['claude', 'gemini', 'codex', 'aider', 'amp', 'cline', 'sweep', 'cursor'];
+    // Keep this list aligned with officially supported CLI integrations in docs.
+    const knownAgents = ['claude', 'gemini', 'codex', 'aider', 'amp'];
     const installed = [];
     
     for (const agent of knownAgents) {
@@ -527,6 +713,7 @@ app.whenReady().then(async () => {
     projectPath,
     context,
     apiDoc,
+    launchCommand,
     livingSpecPreference,
     livingSpecOverridePath
   }) => {
@@ -556,6 +743,21 @@ app.whenReady().then(async () => {
       const safeApiDoc = clampUtf8(apiDoc, MAX_TEXT_FILE_BYTES);
       if (safeApiDoc) {
         fs.writeFileSync(path.join(cacheDir, 'agent_api.md'), safeApiDoc, 'utf8');
+      }
+
+      const launchScriptRelativePath = '.agent_cache/launch_agent.sh';
+      const launchScriptAbsolutePath = path.join(safeWorktreePath, launchScriptRelativePath);
+      const safeLaunchCommand = clampUtf8(typeof launchCommand === 'string' ? launchCommand : '', MAX_TEXT_FILE_BYTES).trim();
+      if (safeLaunchCommand) {
+        const launchScript = [
+          '#!/usr/bin/env sh',
+          'set -e',
+          safeLaunchCommand
+        ].join('\n');
+        fs.writeFileSync(launchScriptAbsolutePath, `${launchScript}\n`, { mode: 0o700 });
+        fs.chmodSync(launchScriptAbsolutePath, 0o700);
+      } else if (fs.existsSync(launchScriptAbsolutePath)) {
+        fs.rmSync(launchScriptAbsolutePath, { force: true });
       }
 
       const normalizedOverridePath = typeof livingSpecOverridePath === 'string'
@@ -603,7 +805,10 @@ app.whenReady().then(async () => {
         fs.rmSync(memoryPath, { force: true });
       }
 
-      return { success: true };
+      return {
+        success: true,
+        launchScriptPath: safeLaunchCommand ? launchScriptRelativePath : undefined
+      };
     } catch (e: any) {
       return { success: false, error: e.message };
     }
@@ -701,6 +906,18 @@ app.whenReady().then(async () => {
   ipcMain.handle('fleet:listProjects', async () => {
     try {
       return { success: true, projects: fleetStore?.listProjects() || [] };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('fleet:removeProject', async (event, { projectPath }: { projectPath: string }) => {
+    try {
+      if (!fleetStore) {
+        return { success: false, error: 'Fleet store is unavailable.' };
+      }
+      const result = fleetStore.removeProject(projectPath);
+      return { success: true, ...result };
     } catch (e: any) {
       return { success: false, error: e.message };
     }

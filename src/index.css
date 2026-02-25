@@ -6,6 +6,62 @@
   color-scheme: dark;
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --bg: #090d14;
+  --fg: #e2e8f0;
+  --panel: #0f1723;
+  --panel-border: #283548;
+  --btn-ghost-bg-hover: #162334;
+  --btn-ghost-border-hover: #36506b;
+  --btn-ghost-fg: #94a3b8;
+  --btn-ghost-fg-hover: #e2e8f0;
+  --btn-primary-bg: #2dd4bf;
+  --btn-primary-fg: #062022;
+  --btn-primary-bg-hover: #22b8a6;
+  --input-bg: #101a29;
+  --input-bg-focus: #162334;
+  --input-border: #35506d;
+  --input-border-focus: #4f7aa3;
+  --xterm-bg: #090d14;
+  --xterm-fg: #e2e8f0;
+  --xterm-cursor: #2dd4bf;
+  --xterm-selection: rgba(45, 212, 191, 0.2);
+  --panel-subtle: #0d1521;
+  --panel-strong: #162334;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-tertiary: #73859d;
+  --text-muted: #66788e;
+}
+
+html[data-theme="docs-circuit"] {
+  --bg: #090d14;
+  --fg: #e2e8f0;
+  --panel: #0f1723;
+  --panel-border: #283548;
+  --btn-ghost-bg-hover: #162334;
+  --btn-ghost-border-hover: #36506b;
+  --btn-ghost-fg: #94a3b8;
+  --btn-ghost-fg-hover: #e2e8f0;
+  --btn-primary-bg: #2dd4bf;
+  --btn-primary-fg: #062022;
+  --btn-primary-bg-hover: #22b8a6;
+  --input-bg: #101a29;
+  --input-bg-focus: #162334;
+  --input-border: #35506d;
+  --input-border-focus: #4f7aa3;
+  --xterm-bg: #090d14;
+  --xterm-fg: #e2e8f0;
+  --xterm-cursor: #2dd4bf;
+  --xterm-selection: rgba(45, 212, 191, 0.2);
+  --panel-subtle: #0d1521;
+  --panel-strong: #162334;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-tertiary: #73859d;
+  --text-muted: #66788e;
+}
+
+html[data-theme="stealth"] {
   --bg: #000000;
   --fg: #e5e5e5;
   --panel: #050505;
@@ -430,6 +486,28 @@ html[data-theme="ice-light"] {
   gap: 0.5rem;
 }
 
+.terminal-guardrail-banner {
+  border-radius: 0.45rem;
+  padding: 0.45rem 0.55rem;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.terminal-guardrail-banner--info {
+  border: 1px solid color-mix(in srgb, var(--btn-ghost-border-hover) 72%, var(--panel-border));
+  background: color-mix(in srgb, var(--panel-subtle) 90%, transparent);
+  color: var(--text-secondary);
+}
+
+.terminal-guardrail-banner--warning {
+  border: 1px solid color-mix(in srgb, #f59e0b 58%, var(--panel-border));
+  background: color-mix(in srgb, #3f2a0a 76%, var(--panel));
+  color: #fde68a;
+}
+
 .terminal-action-notice {
   border: 1px solid var(--panel-border);
   background: color-mix(in srgb, var(--panel-subtle) 86%, transparent);
@@ -438,6 +516,67 @@ html[data-theme="ice-light"] {
   padding: 0.4rem 0.55rem;
   font-size: 11px;
   font-family: var(--font-mono);
+}
+
+.terminal-startup-progress {
+  border: 1px solid color-mix(in srgb, var(--btn-ghost-border-hover) 72%, var(--panel-border));
+  background: color-mix(in srgb, var(--panel-strong) 90%, transparent);
+  color: var(--text-secondary);
+  border-radius: 0.45rem;
+  padding: 0.45rem 0.55rem;
+  font-family: var(--font-mono);
+}
+
+.terminal-startup-overlay {
+  position: absolute;
+  inset: 0.5rem;
+  z-index: 18;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--xterm-bg) 78%, transparent);
+  border-radius: 0.65rem;
+}
+
+.terminal-startup-overlay-card {
+  width: min(28rem, 88%);
+  border: 1px solid color-mix(in srgb, var(--btn-ghost-border-hover) 72%, var(--panel-border));
+  background: color-mix(in srgb, var(--panel-strong) 94%, transparent);
+  border-radius: 0.55rem;
+  padding: 0.7rem 0.8rem;
+  font-family: var(--font-mono);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.32);
+}
+
+.terminal-startup-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.terminal-startup-progress-track {
+  margin-top: 0.35rem;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-border) 72%, transparent);
+  overflow: hidden;
+}
+
+.terminal-startup-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--btn-primary-bg), color-mix(in srgb, var(--btn-primary-bg) 75%, white));
+  transition: width 180ms ease;
+}
+
+.terminal-startup-progress-detail {
+  margin-top: 0.35rem;
+  font-size: 10px;
+  color: var(--text-muted);
 }
 
 .terminal-blocked-banner {

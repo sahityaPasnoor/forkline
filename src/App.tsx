@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Settings, AlertTriangle, GitBranch, Plus, ChevronLeft, ChevronRight, MoreHorizontal } from 'lucide-react';
+import { Settings, AlertTriangle, GitBranch, Plus, ChevronLeft, ChevronRight, MoreHorizontal, Trash2 } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Terminal from './components/Terminal';
 import SettingsModal from './components/SettingsModal';
@@ -8,17 +8,38 @@ import NewTaskModal from './components/NewTaskModal';
 import ApprovalInboxModal from './components/ApprovalInboxModal';
 import TodoPanel from './components/TodoPanel';
 import WelcomeEmptyState from './components/WelcomeEmptyState';
+import WelcomeScreenModal from './components/WelcomeScreenModal';
+import DeleteConfirmationModal from './components/DeleteConfirmationModal';
+import RemoveProjectModal from './components/RemoveProjectModal';
 import WorktreeInventoryModal from './components/WorktreeInventoryModal';
 import LivingSpecModal from './components/LivingSpecModal';
 import { useOrchestrator } from './hooks/useOrchestrator';
 import { APP_THEMES, DEFAULT_THEME_ID } from './lib/themes';
+import { APP_BRANDING } from './config/appBranding';
 
 const SIDEBAR_WIDTH_KEY = 'orchestrator.sidebar.width';
 const PROJECT_HISTORY_KEY = 'orchestrator.project.paths';
 const PROJECT_RAIL_EXPANDED_KEY = 'orchestrator.project.rail.expanded';
 const THEME_KEY = 'orchestrator.theme';
+const WELCOME_SCREEN_KEY = 'orchestrator.welcome.dismissed.v1';
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX_FALLBACK = 520;
+const safeLocalStorageGet = (key: string) => {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+const safeLocalStorageSet = (key: string, value: string) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage failures so UI updates continue without persistence.
+  }
+};
 const normalizeProjectPath = (value: string) => value.trim().replace(/\\/g, '/').replace(/\/+$/, '');
 const basename = (value: string) => {
   const normalized = normalizeProjectPath(value);
@@ -82,8 +103,24 @@ interface WorkspaceInfo {
 interface CommandPaletteItem {
   id: string;
   label: string;
+  projectLabel: string;
+  searchText: string;
   taskId: string;
   projectPath: string;
+}
+
+interface DeleteDialogState {
+  kind: 'task' | 'worktree';
+  taskId?: string;
+  sessionName?: string;
+  branchName: string;
+  projectPath: string;
+  worktreePath: string;
+}
+
+interface RemoveProjectDialogState {
+  projectPath: string;
+  sessionNames: string[];
 }
 
 type SpawnPhase = 'creating_worktree' | 'preparing_environment' | 'launching_agent';
@@ -150,7 +187,8 @@ function App() {
       respondToBlockedTask,
       respondToAllBlockedTasks,
       resolveLivingSpecSelectionPrompt,
-      dismissLivingSpecSelectionPrompt
+      dismissLivingSpecSelectionPrompt,
+      forgetProjectState
     }
   } = useOrchestrator();
 
@@ -168,10 +206,14 @@ function App() {
   const [diffOpen, setDiffOpen] = useState(false);
   const [diffTask, setDiffTask] = useState<string | null>(null);
   const [spawnProgress, setSpawnProgress] = useState<SpawnProgressState | null>(null);
+  const [deleteDialog, setDeleteDialog] = useState<DeleteDialogState | null>(null);
+  const [removeProjectDialog, setRemoveProjectDialog] = useState<RemoveProjectDialogState | null>(null);
   const [theme, setTheme] = useState<string>(() => {
-    if (typeof window === 'undefined') return DEFAULT_THEME_ID;
-    const stored = window.localStorage.getItem(THEME_KEY) || '';
+    const stored = safeLocalStorageGet(THEME_KEY) || '';
     return VALID_THEME_IDS.has(stored) ? stored : DEFAULT_THEME_ID;
+  });
+  const [showWelcomeScreen, setShowWelcomeScreen] = useState<boolean>(() => {
+    return safeLocalStorageGet(WELCOME_SCREEN_KEY) !== '1';
   });
   const [workspaceInfo, setWorkspaceInfo] = useState<WorkspaceInfo>({
     isRepo: false,
@@ -234,11 +276,14 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
     const resolvedTheme = VALID_THEME_IDS.has(theme) ? theme : DEFAULT_THEME_ID;
     document.documentElement.setAttribute('data-theme', resolvedTheme);
-    window.localStorage.setItem(THEME_KEY, resolvedTheme);
+    safeLocalStorageSet(THEME_KEY, resolvedTheme);
   }, [theme]);
+
+  useEffect(() => {
+    document.title = APP_BRANDING.name;
+  }, []);
 
   useEffect(() => {
     if (!operationNotice) return;
@@ -498,7 +543,9 @@ function App() {
   const paletteItems: CommandPaletteItem[] = [
     ...tabs.map((tab) => ({
       id: `task:${tab.id}`,
-      label: `${getTaskDisplayName(tab)} (${basename(tab.basePath)})`,
+      label: getTaskDisplayName(tab),
+      projectLabel: `${basename(tab.basePath)} • ${compactPath(tab.basePath, 3)}`,
+      searchText: `${getTaskDisplayName(tab)} ${tab.agent} ${compactPath(tab.basePath, 3)}`.toLowerCase(),
       projectPath: tab.basePath,
       taskId: tab.id
     }))
@@ -539,7 +586,7 @@ function App() {
   }, [tabs, activeTask?.id, activeTask?.worktreePath]);
   const normalizedPaletteQuery = commandPaletteQuery.trim().toLowerCase();
   const filteredPaletteItems = normalizedPaletteQuery
-    ? paletteItems.filter((item) => item.label.toLowerCase().includes(normalizedPaletteQuery))
+    ? paletteItems.filter((item) => item.searchText.includes(normalizedPaletteQuery))
     : paletteItems;
   const visiblePaletteItems = filteredPaletteItems.slice(0, 80);
   const projectStateBadge = (projectPath: string) => {
@@ -563,11 +610,23 @@ function App() {
     return map;
   }, [tabs]);
 
-  const handleProjectSwitch = (path: string) => {
+  const handleProjectSwitch = useCallback((path: string) => {
     const normalized = normalizeProjectPath(path);
     if (!normalized) return;
     switchProject(normalized);
-  };
+  }, [switchProject]);
+
+  const requestProjectRemoval = useCallback((projectPath: string) => {
+    const normalizedProjectPath = normalizeProjectPath(projectPath);
+    if (!normalizedProjectPath) return;
+    const projectSessionNames = tabs
+      .filter((tab) => normalizeProjectPath(tab.basePath) === normalizedProjectPath)
+      .map((tab) => getTaskDisplayName(tab));
+    setRemoveProjectDialog({
+      projectPath: normalizedProjectPath,
+      sessionNames: projectSessionNames
+    });
+  }, [tabs]);
 
   const addProjectPath = (path: string, activate: boolean) => {
     const normalized = normalizeProjectPath(path);
@@ -620,11 +679,11 @@ function App() {
     commandPaletteItemRefs.current = [];
   }, []);
 
-  const handleCommandPaletteSelect = (item: CommandPaletteItem) => {
+  const handleCommandPaletteSelect = useCallback((item: CommandPaletteItem) => {
     handleProjectSwitch(item.projectPath);
     setActiveTab(item.taskId);
     closeCommandPalette();
-  };
+  }, [closeCommandPalette, handleProjectSwitch, setActiveTab]);
 
   useEffect(() => {
     if (!isCommandPaletteOpen) return;
@@ -658,6 +717,45 @@ function App() {
     });
     return () => cancelAnimationFrame(rafId);
   }, [isCommandPaletteOpen]);
+
+  const handleCommandPaletteNavigationKey = useCallback((key: string) => {
+    if (key === 'Escape') {
+      closeCommandPalette();
+      return true;
+    }
+    if (visiblePaletteItems.length === 0) return false;
+    if (key === 'ArrowDown') {
+      setCommandPaletteActiveIndex((prev) => (prev + 1) % visiblePaletteItems.length);
+      return true;
+    }
+    if (key === 'ArrowUp') {
+      setCommandPaletteActiveIndex((prev) => (prev - 1 + visiblePaletteItems.length) % visiblePaletteItems.length);
+      return true;
+    }
+    if (key === 'Enter') {
+      const selected = visiblePaletteItems[commandPaletteActiveIndex] || visiblePaletteItems[0];
+      if (selected) handleCommandPaletteSelect(selected);
+      return true;
+    }
+    return false;
+  }, [closeCommandPalette, commandPaletteActiveIndex, handleCommandPaletteSelect, visiblePaletteItems]);
+
+  useEffect(() => {
+    if (!isCommandPaletteOpen) return;
+    const onPaletteKeyDown = (event: KeyboardEvent) => {
+      if (!isCommandPaletteOpen) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const handled = handleCommandPaletteNavigationKey(event.key);
+      if (!handled) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    window.addEventListener('keydown', onPaletteKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', onPaletteKeyDown, true);
+    };
+  }, [handleCommandPaletteNavigationKey, isCommandPaletteOpen]);
 
   useEffect(() => {
     if (!spawnProgress?.taskId) return;
@@ -697,6 +795,7 @@ function App() {
       createBaseBranchIfMissing?: boolean;
       dependencyCloneMode?: 'copy_on_write' | 'full_copy';
       livingSpecOverridePath?: string;
+      launchCommandOverride?: string;
     }
   ) => {
     if (!basePath || !sourceStatus?.valid) {
@@ -714,6 +813,7 @@ function App() {
       rawTaskName,
       agentCommand,
       prompt,
+      launchCommandOverride: options?.launchCommandOverride,
       baseBranch,
       createBaseBranchIfMissing: options?.createBaseBranchIfMissing === true,
       dependencyCloneMode: options?.dependencyCloneMode,
@@ -753,48 +853,137 @@ function App() {
     setOperationNotice(tab ? `Merged ${getTaskDisplayName(tab)} into ${parentBranch}.` : 'Merge completed.');
   };
 
-  const handleDeleteClick = useCallback(async (id: string) => {
+  const requestDeleteTask = useCallback((id: string) => {
     const tab = tabs.find(t => t.id === id);
     if (!tab) return false;
-
-    const confirmed = window.confirm(`Delete agent branch "${tab.name}" and remove its worktree?`);
-    if (!confirmed) return false;
-
-    const res = await closeTaskById(id, 'delete');
-    if (!res.success) {
-      setOperationNotice(`Failed to delete worktree: ${res.error || 'unknown error'}.`);
-      return false;
-    }
-    setOperationNotice(`Deleted worktree for ${getTaskDisplayName(tab)}.`);
+    const branchName = (tab.name || '').trim() || basename(tab.worktreePath || tab.basePath);
+    const worktreePath = (tab.worktreePath || '').trim();
+    setDeleteDialog({
+      kind: 'task',
+      taskId: tab.id,
+      sessionName: getTaskDisplayName(tab),
+      branchName,
+      projectPath: tab.basePath,
+      worktreePath
+    });
     return true;
-  }, [tabs, closeTaskById]);
+  }, [tabs]);
 
   const handleTerminalDelete = useCallback((taskId: string) => {
-    void handleDeleteClick(taskId);
-  }, [handleDeleteClick]);
+    requestDeleteTask(taskId);
+  }, [requestDeleteTask]);
 
-  const handleDeleteWorktree = async (projectPath: string, worktreePath: string, branchName?: string | null) => {
+  const handleDeleteWorktree = (projectPath: string, worktreePath: string, branchName?: string | null) => {
     const normalizedWorktreePath = normalizeProjectPath(worktreePath);
     const matchingTab = tabs.find(tab => normalizeProjectPath(tab.worktreePath || '') === normalizedWorktreePath);
     if (matchingTab) {
-      const deleted = await handleDeleteClick(matchingTab.id);
-      if (deleted) {
-        setIsWorktreeInventoryOpen(false);
-      }
+      requestDeleteTask(matchingTab.id);
       return;
     }
 
     const resolvedBranch = (branchName || '').trim() || basename(normalizedWorktreePath);
-    const confirmed = window.confirm(`Delete worktree "${resolvedBranch}" and remove the branch?`);
-    if (!confirmed) return;
-    const res = await window.electronAPI.removeWorktree(projectPath, resolvedBranch, worktreePath, true);
-    if (!res.success) {
-      setOperationNotice(`Failed to delete worktree: ${res.error || 'unknown error'}.`);
-      return;
-    }
-    setOperationNotice(`Deleted worktree ${resolvedBranch}.`);
-    setIsWorktreeInventoryOpen(false);
+    setDeleteDialog({
+      kind: 'worktree',
+      branchName: resolvedBranch,
+      projectPath,
+      worktreePath: normalizedWorktreePath
+    });
   };
+
+  const handleConfirmDeleteDialog = useCallback(async () => {
+    if (!deleteDialog) {
+      return { success: false, error: 'No delete target selected.' };
+    }
+
+    if (deleteDialog.kind === 'task' && deleteDialog.taskId) {
+      const res = await closeTaskById(deleteDialog.taskId, 'delete');
+      if (!res.success) {
+        return { success: false, error: res.error || 'Failed to delete worktree.' };
+      }
+      setOperationNotice(`Deleted worktree for ${deleteDialog.sessionName || deleteDialog.branchName}.`);
+      setIsWorktreeInventoryOpen(false);
+      return { success: true };
+    }
+
+    const res = await window.electronAPI.removeWorktree(
+      deleteDialog.projectPath,
+      deleteDialog.branchName,
+      deleteDialog.worktreePath,
+      true
+    );
+    if (!res.success) {
+      return { success: false, error: res.error || 'Failed to delete worktree.' };
+    }
+    setOperationNotice(`Deleted worktree ${deleteDialog.branchName}.`);
+    setIsWorktreeInventoryOpen(false);
+    return { success: true };
+  }, [closeTaskById, deleteDialog]);
+
+  const handleConfirmRemoveProject = useCallback(async () => {
+    if (!removeProjectDialog) {
+      return { success: false, error: 'No project selected.' };
+    }
+
+    const normalizedProjectPath = normalizeProjectPath(removeProjectDialog.projectPath);
+    if (!normalizedProjectPath) {
+      return { success: false, error: 'Invalid project path.' };
+    }
+
+    const sessionsToDelete = tabs
+      .filter((tab) => normalizeProjectPath(tab.basePath) === normalizedProjectPath)
+      .map((tab) => ({ id: tab.id, name: getTaskDisplayName(tab) }));
+    const fallbackProjectPaths = Array.from(new Set([
+      ...projectPaths,
+      ...tabs.map((tab) => normalizeProjectPath(tab.basePath))
+    ]))
+      .map((path) => normalizeProjectPath(path))
+      .filter((path) => !!path && path !== normalizedProjectPath);
+
+    const failedSessions: string[] = [];
+    for (const session of sessionsToDelete) {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await closeTaskById(session.id, 'delete');
+      if (!result.success) {
+        failedSessions.push(`${session.name}: ${result.error || 'unknown error'}`);
+      }
+    }
+
+    if (failedSessions.length > 0) {
+      return {
+        success: false,
+        error: `Failed to delete ${failedSessions.length} session(s): ${failedSessions.slice(0, 2).join(' | ')}`
+      };
+    }
+
+    const fleetRes = await window.electronAPI.fleetRemoveProject(normalizedProjectPath);
+    if (!fleetRes.success) {
+      return { success: false, error: fleetRes.error || 'Failed to remove project history.' };
+    }
+
+    forgetProjectState(normalizedProjectPath);
+    setProjectPaths((prev) => prev
+      .map((path) => normalizeProjectPath(path))
+      .filter((path) => !!path && path !== normalizedProjectPath));
+    setIsWorktreeInventoryOpen(false);
+
+    if (normalizeProjectPath(basePath) === normalizedProjectPath) {
+      switchProject(fallbackProjectPaths[0] || '');
+    }
+
+    const sessionCount = sessionsToDelete.length;
+    setOperationNotice(
+      `Removed project ${basename(normalizedProjectPath)} and ${sessionCount} session${sessionCount === 1 ? '' : 's'}.`
+    );
+    return { success: true };
+  }, [basePath, closeTaskById, forgetProjectState, projectPaths, removeProjectDialog, switchProject, tabs]);
+
+  const handleWelcomeDismiss = () => {
+    setShowWelcomeScreen(false);
+    safeLocalStorageSet(WELCOME_SCREEN_KEY, '1');
+  };
+  const handleThemeChange = useCallback((nextTheme: string) => {
+    setTheme(VALID_THEME_IDS.has(nextTheme) ? nextTheme : DEFAULT_THEME_ID);
+  }, []);
 
   return (
     <div className="flex h-screen w-full relative overflow-hidden">
@@ -853,36 +1042,56 @@ function App() {
             const initial = basename(projectPath).slice(0, 1).toUpperCase();
             const stateDot = projectStateBadge(projectPath);
             return (
-              <button
-                key={projectPath}
-                type="button"
-                onClick={() => handleProjectSwitch(projectPath)}
-                className={`relative rounded-md text-[11px] font-mono flex items-center transition-colors border ${
-                  isProjectRailExpanded
-                    ? `w-full h-10 px-2 justify-start gap-2 ${
-                      isActiveProject
-                        ? 'border-[var(--input-border-focus)] bg-[var(--panel-strong)] text-[var(--text-primary)]'
-                        : 'border-transparent bg-transparent text-[var(--text-secondary)] hover:bg-[var(--panel)] hover:text-[var(--text-primary)]'
-                    }`
-                    : `w-9 h-9 justify-center ${isActiveProject ? 'border-[var(--input-border-focus)] bg-[var(--panel-strong)] text-[var(--text-primary)]' : 'border-transparent text-[var(--text-secondary)] hover:bg-[var(--panel)]'}`
-                }`}
-                title={formatProjectLabel(projectPath)}
-              >
-                {isProjectRailExpanded ? (
-                  <>
-                    <span className="w-5 h-5 rounded border border-[var(--panel-border)] bg-[var(--panel)] text-[var(--text-secondary)] flex items-center justify-center text-[10px] shrink-0">
+              <div key={projectPath} className={`group relative ${isProjectRailExpanded ? 'w-full' : ''}`}>
+                <button
+                  type="button"
+                  onClick={() => handleProjectSwitch(projectPath)}
+                  className={`relative rounded-md text-[11px] font-mono flex items-center transition-colors border ${
+                    isProjectRailExpanded
+                      ? `w-full h-10 pl-2 pr-8 justify-start gap-2 ${
+                        isActiveProject
+                          ? 'border-[var(--input-border-focus)] bg-[var(--panel-strong)] text-[var(--text-primary)]'
+                          : 'border-transparent bg-transparent text-[var(--text-secondary)] hover:bg-[var(--panel)] hover:text-[var(--text-primary)]'
+                      }`
+                      : `w-9 h-9 justify-center ${isActiveProject ? 'border-[var(--input-border-focus)] bg-[var(--panel-strong)] text-[var(--text-primary)]' : 'border-transparent text-[var(--text-secondary)] hover:bg-[var(--panel)]'}`
+                  }`}
+                  title={formatProjectLabel(projectPath)}
+                >
+                  {isProjectRailExpanded ? (
+                    <>
+                      <span className="w-5 h-5 rounded border border-[var(--panel-border)] bg-[var(--panel)] text-[var(--text-secondary)] flex items-center justify-center text-[10px] shrink-0">
+                        {initial || '#'}
+                      </span>
+                      <span className="truncate flex-1 text-left">{projectLabelByPath[projectPath] || basename(projectPath)}</span>
+                      <span className={`w-2 h-2 rounded-full border border-[var(--panel)] shrink-0 ${stateDot}`} />
+                    </>
+                  ) : (
+                    <span className="relative w-5 h-5 rounded border border-[var(--panel-border)] bg-[var(--panel)] text-[10px] text-[var(--text-secondary)] flex items-center justify-center">
                       {initial || '#'}
+                      <span className={`absolute -right-1 -bottom-1 w-2.5 h-2.5 rounded-full border border-[var(--panel)] ${stateDot}`} />
                     </span>
-                    <span className="truncate flex-1 text-left">{projectLabelByPath[projectPath] || basename(projectPath)}</span>
-                    <span className={`w-2 h-2 rounded-full border border-[var(--panel)] shrink-0 ${stateDot}`} />
-                  </>
-                ) : (
-                  <span className="relative w-5 h-5 rounded border border-[var(--panel-border)] bg-[var(--panel)] text-[10px] text-[var(--text-secondary)] flex items-center justify-center">
-                    {initial || '#'}
-                    <span className={`absolute -right-1 -bottom-1 w-2.5 h-2.5 rounded-full border border-[var(--panel)] ${stateDot}`} />
-                  </span>
+                  )}
+                </button>
+                {isProjectRailExpanded && (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      requestProjectRemoval(projectPath);
+                    }}
+                    className={`absolute right-1.5 top-1/2 -translate-y-1/2 h-6 w-6 rounded border border-transparent flex items-center justify-center transition-colors ${
+                      isActiveProject
+                        ? 'text-[var(--text-secondary)] hover:text-red-300 hover:bg-[#2b1111]'
+                        : 'text-[var(--text-muted)] opacity-0 group-hover:opacity-100 hover:text-red-300 hover:bg-[#2b1111]'
+                    }`}
+                    title={`Remove project ${basename(projectPath)}`}
+                    aria-label={`Remove project ${basename(projectPath)}`}
+                  >
+                    <Trash2 size={11} />
+                  </button>
                 )}
-              </button>
+              </div>
             );
           })}
         </div>
@@ -979,6 +1188,9 @@ function App() {
 
         <div className="app-panel rounded-xl px-3 py-2 z-30">
           <div className="flex items-center gap-3 min-w-0 flex-wrap lg:flex-nowrap">
+            <div className="w-8 h-8 rounded-md border border-[var(--panel-border)] bg-[var(--panel-subtle)] p-1.5 shrink-0">
+              <img src={APP_BRANDING.logoSrc} alt={`${APP_BRANDING.name} logo`} className="w-full h-full" />
+            </div>
             <div className="min-w-0 flex-1 basis-full lg:basis-auto">
               <div className="text-[13px] text-[var(--text-primary)] font-mono truncate" title={headerAgentName}>
                 {headerAgentName}
@@ -1082,6 +1294,7 @@ function App() {
                         context={context}
                         envVars={envVars}
                         prompt={tab.prompt}
+                        launchCommandOverride={tab.launchCommandOverride}
                         isActive={tab.id === activeTask.id}
                         shouldBootstrap={tab.hasBootstrapped === false}
                         onBootstrapped={markTaskBootstrapped}
@@ -1215,7 +1428,7 @@ function App() {
         setNetworkGuard={setNetworkGuard}
         availableAgents={availableAgents}
         theme={theme}
-        setTheme={setTheme}
+        setTheme={handleThemeChange}
       />
 
       {diffOpen && diffTask && (
@@ -1293,8 +1506,27 @@ function App() {
         onClose={dismissLivingSpecSelectionPrompt}
       />
 
+      <DeleteConfirmationModal
+        isOpen={!!deleteDialog}
+        kind={deleteDialog?.kind === 'task' ? 'session' : 'worktree'}
+        sessionName={deleteDialog?.sessionName}
+        branchName={deleteDialog?.branchName || ''}
+        projectPath={deleteDialog?.projectPath || ''}
+        worktreePath={deleteDialog?.worktreePath || ''}
+        onClose={() => setDeleteDialog(null)}
+        onConfirm={handleConfirmDeleteDialog}
+      />
+
+      <RemoveProjectModal
+        isOpen={!!removeProjectDialog}
+        projectPath={removeProjectDialog?.projectPath || ''}
+        sessionNames={removeProjectDialog?.sessionNames || []}
+        onClose={() => setRemoveProjectDialog(null)}
+        onConfirm={handleConfirmRemoveProject}
+      />
+
       {isCommandPaletteOpen && (
-        <div className="fixed inset-0 z-[92] bg-black/70 flex items-start justify-center pt-[10vh] px-4" onClick={closeCommandPalette}>
+        <div className="fixed inset-0 z-[92] bg-black/65 backdrop-blur-sm flex items-start justify-center pt-[9vh] px-4" onClick={closeCommandPalette}>
           <div className="w-full max-w-xl app-panel border border-[var(--panel-border)] rounded-xl overflow-hidden shadow-2xl" onClick={(event) => event.stopPropagation()}>
             <div className="px-3 py-2.5 border-b border-[var(--panel-border)]">
               <input
@@ -1302,29 +1534,13 @@ function App() {
                 value={commandPaletteQuery}
                 onChange={(event) => setCommandPaletteQuery(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === 'Escape') {
-                    event.preventDefault();
-                    closeCommandPalette();
-                    return;
-                  }
-                  if (visiblePaletteItems.length === 0) return;
-                  if (event.key === 'ArrowDown') {
-                    event.preventDefault();
-                    setCommandPaletteActiveIndex((prev) => (prev + 1) % visiblePaletteItems.length);
-                    return;
-                  }
-                  if (event.key === 'ArrowUp') {
-                    event.preventDefault();
-                    setCommandPaletteActiveIndex((prev) => (prev - 1 + visiblePaletteItems.length) % visiblePaletteItems.length);
-                    return;
-                  }
-                  if (event.key === 'Enter') {
-                    event.preventDefault();
-                    const selected = visiblePaletteItems[commandPaletteActiveIndex] || visiblePaletteItems[0];
-                    if (selected) handleCommandPaletteSelect(selected);
-                  }
+                  if (event.metaKey || event.ctrlKey || event.altKey) return;
+                  const handled = handleCommandPaletteNavigationKey(event.key);
+                  if (!handled) return;
+                  event.preventDefault();
+                  event.stopPropagation();
                 }}
-                placeholder="Jump to session..."
+                placeholder="Jump to session or project..."
                 className="w-full input-stealth rounded px-3 py-2 text-sm font-mono"
               />
             </div>
@@ -1341,13 +1557,17 @@ function App() {
                     }}
                     onMouseEnter={() => setCommandPaletteActiveIndex(index)}
                     onClick={() => handleCommandPaletteSelect(item)}
-                    className={`btn-ghost w-full text-left px-3 py-2 rounded text-sm font-mono ${
+                    aria-selected={index === commandPaletteActiveIndex}
+                    className={`w-full text-left px-3 py-2 rounded-md font-mono border transition-colors ${
                       index === commandPaletteActiveIndex
-                        ? 'bg-[var(--panel-subtle)] border-[var(--input-border-focus)] text-[var(--text-primary)]'
-                        : 'border-transparent'
+                        ? 'bg-[var(--panel-strong)] border-[var(--btn-primary-bg)] text-[var(--text-primary)]'
+                        : 'border-transparent text-[var(--text-secondary)] hover:bg-[var(--panel-subtle)] hover:text-[var(--text-primary)]'
                     }`}
                   >
-                    <span className="truncate">{item.label}</span>
+                    <div className="truncate text-[13px]">{item.label}</div>
+                    <div className="truncate text-[10px] mt-0.5 text-[var(--text-tertiary)]">
+                      {item.projectLabel}
+                    </div>
                   </button>
                 ))
               )}
@@ -1355,6 +1575,13 @@ function App() {
           </div>
         </div>
       )}
+
+      <WelcomeScreenModal
+        isOpen={showWelcomeScreen}
+        theme={theme}
+        setTheme={handleThemeChange}
+        onContinue={handleWelcomeDismiss}
+      />
     </div>
   );
 }

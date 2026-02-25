@@ -13,6 +13,12 @@ export interface AppTheme {
 
 export const APP_THEMES: AppTheme[] = [
   {
+    id: 'docs-circuit',
+    name: 'Docs Circuit',
+    description: 'Matches the documentation default dark palette',
+    preview: { bg: '#090d14', panel: '#0f1723', border: '#283548', text: '#e2e8f0', accent: '#2dd4bf' }
+  },
+  {
     id: 'stealth',
     name: 'Stealth Mono',
     description: 'High-contrast dark operator theme',
@@ -74,4 +80,4 @@ export const APP_THEMES: AppTheme[] = [
   }
 ];
 
-export const DEFAULT_THEME_ID = APP_THEMES[0].id;
+export const DEFAULT_THEME_ID = 'docs-circuit';

@@ -10,12 +10,18 @@ Behavior-first rule (applies to all features):
 2. Encode those expectations in tests/fixtures (not implementation-shaped assertions).
 3. Run tests, then fix code until behavior matches expectations.
 4. If tests pass but user-visible behavior is wrong, treat tests as incomplete and update them before shipping.
+
+## Restored Session UX Invariants
+- Restored tabs must never show a blank terminal area during PTY attach/relaunch. Render a visible startup progress state until real terminal output is available.
+- Do not print internal bootstrap command text (for example relaunch shell command strings) into user-facing terminal output.
+- Keep relaunch behavior state-driven and centralized (attach -> restore -> prepare workspace -> launch agent). Avoid one-off UI or command hacks.
+- If relaunch is required because PTY was missing after app restart, surface progress and reason in UI state, not as noisy terminal log spam.
+
 ## Project Snapshot
 - Product: `Forkline` (local-first multi-agent orchestration platform).
 - Runtime split:
   - `src/` + `electron/`: GUI (React + Electron + TypeScript).
   - `packages/core/`: core daemon (Node.js CommonJS JavaScript).
-  - `packages/tui/`: experimental terminal client (Node.js CommonJS JavaScript).
   - `packages/protocol/`: shared protocol contract (JavaScript).
 - Toolchain: Node.js `>=20`, npm (`package-lock.json` is source of truth).
 
@@ -23,7 +29,6 @@ Behavior-first rule (applies to all features):
 - Install: `npm ci`
 - Dev GUI: `npm run dev`
 - Core daemon: `npm run core:start`
-- TUI (experimental): `npm run tui:start:experimental`
 - Typecheck: `npm run typecheck`
 - Build: `npm run build`
 - E2E smoke: `npx playwright test e2e/electron.smoke.spec.js`

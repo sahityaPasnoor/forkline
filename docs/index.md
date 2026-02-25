@@ -3,58 +3,91 @@ layout: home
 
 hero:
   name: "Forkline"
-  text: "Open-source control plane for local multi-agent coding"
-  tagline: "Run many coding agents in parallel with isolated Git worktrees, persistent PTY sessions, and operator approvals."
+  text: "Orchestrate agents. Do not replace them."
+  tagline: "Forkline is a local control plane for running many coding agents in isolated Git worktrees."
   image:
     src: /logo.svg
     alt: Forkline logo
   actions:
     - theme: brand
-      text: Get Started
+      text: Why Forkline
+      link: /#why-forkline
+    - theme: alt
+      text: Install + Launch
       link: /guide/getting-started
     - theme: alt
-      text: Explore API
+      text: Core API
       link: /reference/core-api
-
-features:
-  - title: Worktree-native orchestration
-    details: Every task can run in a dedicated worktree and branch, reducing branch collisions and keeping merges explicit.
-  - title: Persistent PTY lifecycle
-    details: Forkline keeps PTY state and output buffers so operators can reattach without losing terminal context.
-  - title: Token-auth local APIs
-    details: Core and GUI control servers enforce token auth, loopback-only networking, and browser-origin rejection.
-  - title: Fleet observability
-    details: Track task state, blocked prompts, usage, and quick actions across active sessions.
-  - title: Model-agnostic workflow
-    details: Forkline orchestrates agent CLIs instead of replacing them, with policy controls layered on top.
-  - title: Open-source release discipline
-    details: Security checks, SBOM generation, provenance, and attestation are wired into CI and release workflows.
 ---
 
-## What you will find here
+<div id="why-forkline" class="why-focus">
+  <p class="why-kicker">Why Forkline</p>
+  <h2>Forkline is not another agent app.</h2>
+  <p>
+    Keep your existing agent CLI, model choice, and Git workflow. Forkline adds the operator layer for parallel
+    execution, approvals, blocked-task handling, and persistent runtime state.
+  </p>
+</div>
 
-- Operator docs for setup, daily workflow, and troubleshooting.
-- Architecture docs for `core`, `protocol`, `tui`, `electron`, and renderer boundaries.
-- API reference for daemon routes, SSE event envelopes, quick actions, and environment variables.
-- Security and release playbooks aligned with open-source standards.
-- Documentation style guide for contributors.
+<div class="why-grid">
+  <article class="why-card">
+    <h3>What stays the same</h3>
+    <p>Your agent commands, your repository, your local machine, your Git branching model.</p>
+  </article>
+  <article class="why-card">
+    <h3>What Forkline adds</h3>
+    <p>Spawn, monitor, approve, merge, delete, and restore many tasks in one place.</p>
+  </article>
+  <article class="why-card">
+    <h3>Supported CLI agents</h3>
+    <p>Auto-detected commands: <code>claude</code>, <code>gemini</code>, <code>codex</code>, <code>aider</code>, <code>amp</code>.</p>
+    <p>Only these commands appear in the Forkline agent selector.</p>
+  </article>
+</div>
 
-## Product scope
+## Why This Is Different
 
-Forkline has three runtime tiers:
+<div class="diff-stack">
+  <article class="diff-row">
+    <h3>Agent app or plugin</h3>
+    <p><strong>Best at:</strong> one active coding loop.</p>
+    <p><strong>Forkline adds:</strong> multi-agent orchestration across isolated worktrees with one operator view.</p>
+  </article>
+  <article class="diff-row">
+    <h3>Raw terminal + <code>git worktree</code></h3>
+    <p><strong>Best at:</strong> manual flexibility.</p>
+    <p><strong>Forkline adds:</strong> structured task lifecycle, approval inbox, and persistent fleet/session state.</p>
+  </article>
+  <article class="diff-row">
+    <h3>Agent framework/SDK</h3>
+    <p><strong>Best at:</strong> building custom agent systems.</p>
+    <p><strong>Forkline adds:</strong> ready local operator runtime for day-to-day coding operations.</p>
+  </article>
+</div>
 
-- `core` (`stable`): headless daemon with PTY and Git orchestration.
-- `gui` (`stable`): Electron + React command center.
-- `tui` (`experimental`): terminal client over the core API.
+## Install + Launch
 
-## Source of truth
+Package status (as of February 25, 2026): the `forkline` npm package is not published yet.
 
-These docs are derived from the implementation in:
+Use source mode:
 
-- `packages/core/src/daemon.js`
-- `packages/core/src/services/*`
-- `packages/protocol/src/*`
-- `packages/tui/src/index.js`
-- `electron/agentServer.ts`
+```bash
+npm ci
+npm run dev
+```
 
-For architecture and policy detail, see `documents/` and root open-source governance files.
+Use a local npm tarball build (production-style simulation):
+
+```bash
+npm ci
+npm pack
+npm install -g --offline ./forkline-<version>.tgz
+forkline-core
+forkline
+```
+
+## Start Here
+
+- Install and run: [/guide/getting-started](/guide/getting-started)
+- Daily workflow: [/guide/how-to-use](/guide/how-to-use)
+- API contract: [/reference/core-api](/reference/core-api)

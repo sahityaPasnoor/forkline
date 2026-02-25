@@ -15,7 +15,7 @@ Use GitHub private advisory reporting:
 
 Include:
 - clear impact summary
-- affected component (`core`, `tui`, `gui`, `protocol`)
+- affected component (`core`, `gui`, `protocol`)
 - reproduction steps / PoC
 - expected vs actual behavior
 - suggested remediation if available

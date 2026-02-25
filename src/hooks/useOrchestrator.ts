@@ -38,6 +38,7 @@ interface CreateTaskInput {
   rawTaskName: string;
   agentCommand: string;
   prompt: string;
+  launchCommandOverride?: string;
   baseBranch?: string;
   createBaseBranchIfMissing?: boolean;
   dependencyCloneMode?: 'copy_on_write' | 'full_copy';
@@ -189,6 +190,52 @@ const extractTaskUsage = (payload: unknown): TaskUsage | null => {
   }
 
   return null;
+};
+
+const usageFieldValue = (usage: TaskUsage | undefined, key: keyof TaskUsage) => {
+  const value = usage?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+};
+
+const taskUsageFieldChanged = (prev: TaskUsage | undefined, next: TaskUsage | undefined, key: keyof TaskUsage) => {
+  return usageFieldValue(prev, key) !== usageFieldValue(next, key);
+};
+
+const hasMeaningfulTaskUsageChange = (prev: TaskUsage | undefined, next: TaskUsage | undefined) => {
+  if (!prev && next) return true;
+  if (!next) return false;
+  for (const key of [
+    'contextTokens',
+    'promptTokens',
+    'completionTokens',
+    'totalTokens',
+    'contextWindow',
+    'percentUsed',
+    'costUsd',
+    'promptCostUsd',
+    'completionCostUsd'
+  ] as const) {
+    if (taskUsageFieldChanged(prev, next, key)) return true;
+  }
+  return false;
+};
+
+const hasLargeTaskUsageDelta = (prev: TaskUsage | undefined, next: TaskUsage | undefined) => {
+  if (!prev || !next) return true;
+  const totalDelta = Math.abs((next.totalTokens ?? prev.totalTokens ?? 0) - (prev.totalTokens ?? 0));
+  const promptDelta = Math.abs((next.promptTokens ?? prev.promptTokens ?? 0) - (prev.promptTokens ?? 0));
+  const completionDelta = Math.abs((next.completionTokens ?? prev.completionTokens ?? 0) - (prev.completionTokens ?? 0));
+  const contextDelta = Math.abs((next.contextTokens ?? prev.contextTokens ?? 0) - (prev.contextTokens ?? 0));
+  const percentDelta = Math.abs((next.percentUsed ?? prev.percentUsed ?? 0) - (prev.percentUsed ?? 0));
+  const costDelta = Math.abs((next.costUsd ?? prev.costUsd ?? 0) - (prev.costUsd ?? 0));
+  return (
+    totalDelta >= 64
+    || promptDelta >= 32
+    || completionDelta >= 32
+    || contextDelta >= 64
+    || percentDelta >= 1
+    || costDelta >= 0.001
+  );
 };
 
 const sanitizeTaskUsageMap = (value: unknown): Record<string, TaskUsage> => {
@@ -393,6 +440,9 @@ const sanitizeTaskTabs = (value: unknown, basePathFallback: string, defaultComma
       parentBranch: typeof tab.parentBranch === 'string' && tab.parentBranch.trim() ? tab.parentBranch.trim() : undefined,
       parentTaskId: typeof tab.parentTaskId === 'string' && tab.parentTaskId.trim() ? tab.parentTaskId : undefined,
       prompt: typeof tab.prompt === 'string' ? tab.prompt : undefined,
+      launchCommandOverride: typeof tab.launchCommandOverride === 'string' && tab.launchCommandOverride.trim()
+        ? tab.launchCommandOverride.trim()
+        : undefined,
       livingSpecOverridePath: typeof tab.livingSpecOverridePath === 'string' && tab.livingSpecOverridePath.trim()
         ? normalizeRelativeRepoPath(tab.livingSpecOverridePath)
         : undefined,
@@ -708,6 +758,32 @@ export const useOrchestrator = () => {
     setAttentionEvents([]);
   }, []);
 
+  const forgetProjectState = useCallback((projectPath: string) => {
+    const normalizedProjectPath = normalizeProjectPath(projectPath);
+    if (!normalizedProjectPath) return;
+
+    const removeScopedKey = <T extends Record<string, unknown>>(state: T): T => {
+      if (!Object.prototype.hasOwnProperty.call(state, normalizedProjectPath)) return state;
+      const next = { ...state };
+      delete next[normalizedProjectPath];
+      return next;
+    };
+
+    setActiveTabByProject(prev => removeScopedKey(prev));
+    setProjectPermissions(prev => removeScopedKey(prev));
+    setLivingSpecPreferences(prev => removeScopedKey(prev));
+    setLivingSpecCandidatesByProject(prev => removeScopedKey(prev));
+    setLivingSpecSummariesByProject(prev => removeScopedKey(prev));
+    setPendingApprovals(prev => prev.filter((item) => {
+      if (normalizeProjectPath(item.projectPath) === normalizedProjectPath) return false;
+      const matchingTab = tabsRef.current.find((tab) => tab.id === item.taskId);
+      if (!matchingTab) return true;
+      return normalizeProjectPath(matchingTab.basePath) !== normalizedProjectPath;
+    }));
+    setAttentionEvents(prev => prev.filter((event) => normalizeProjectPath(event.projectPath) !== normalizedProjectPath));
+    setLivingSpecSelectionPrompt(prev => (prev?.projectPath === normalizedProjectPath ? null : prev));
+  }, []);
+
   const clearAttentionForTask = useCallback((taskId: string, kinds?: AttentionEvent['kind'][]) => {
     if (!ATTENTION_FEED_ENABLED) return;
     setAttentionEvents(prev => prev.filter((event) => {
@@ -788,6 +864,7 @@ export const useOrchestrator = () => {
     rawTaskName,
     agentCommand,
     prompt,
+    launchCommandOverride,
     baseBranch,
     createBaseBranchIfMissing,
     dependencyCloneMode: taskDependencyCloneMode,
@@ -815,6 +892,9 @@ export const useOrchestrator = () => {
       parentBranch: selectedParentBranch,
       parentTaskId,
       prompt,
+      launchCommandOverride: typeof launchCommandOverride === 'string' && launchCommandOverride.trim()
+        ? launchCommandOverride.trim()
+        : undefined,
       livingSpecOverridePath: livingSpecOverridePath ? normalizeRelativeRepoPath(livingSpecOverridePath) : undefined,
       capabilities,
       hasBootstrapped: false
@@ -863,9 +943,9 @@ export const useOrchestrator = () => {
     let changed = false;
     tabsRef.current = tabsRef.current.map(tab => {
       if (tab.id !== taskId) return tab;
-      if (tab.hasBootstrapped) return tab;
+      if (tab.hasBootstrapped && !tab.launchCommandOverride) return tab;
       changed = true;
-      return { ...tab, hasBootstrapped: true };
+      return { ...tab, hasBootstrapped: true, launchCommandOverride: undefined };
     });
     if (changed) {
       setTabs(tabsRef.current);
@@ -932,6 +1012,55 @@ export const useOrchestrator = () => {
     modeOverride?: HandoverMode
   ): Promise<HandoverResult> => {
     const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+    const runHiddenLine = async (line: string, fallbackCwd?: string) => {
+      const normalizedLine = String(line || '').replace(/[\r\n]+/g, ' ').trim();
+      if (!normalizedLine) return { success: false, error: 'Empty PTY command.' };
+      const maxAttempts = 8;
+      for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const result = await window.electronAPI.launchPty(taskId, normalizedLine, { suppressEcho: true });
+          if (result?.success) return { success: true as const };
+          const message = String(result?.error || 'PTY launch failed.');
+          if (attempt < maxAttempts && /not running|session not found/i.test(message)) {
+            window.electronAPI.createPty(taskId, fallbackCwd || '');
+            // eslint-disable-next-line no-await-in-loop
+            await sleep(Math.min(900, 120 * (attempt + 1)));
+            continue;
+          }
+          return { success: false as const, error: message };
+        } catch (error: any) {
+          const message = String(error?.message || 'PTY launch failed.');
+          if (attempt < maxAttempts && /not running|session not found/i.test(message)) {
+            window.electronAPI.createPty(taskId, fallbackCwd || '');
+            // eslint-disable-next-line no-await-in-loop
+            await sleep(Math.min(900, 120 * (attempt + 1)));
+            continue;
+          }
+          return { success: false as const, error: message };
+        }
+      }
+      return { success: false as const, error: 'PTY launch timed out.' };
+    };
+    const waitForAgentMode = async (timeoutMs: number) => {
+      const deadline = Date.now() + Math.max(300, timeoutMs);
+      while (Date.now() < deadline) {
+        try {
+          const sessionsResult = await window.electronAPI.listPtySessions();
+          const currentSession = sessionsResult.success
+            ? sessionsResult.sessions?.find((item) => item.taskId === taskId)
+            : undefined;
+          const mode = String(currentSession?.mode || '').toLowerCase();
+          if (mode === 'agent' || mode === 'blocked' || mode === 'tui') {
+            return true;
+          }
+        } catch {
+          // Best effort polling only.
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(120);
+      }
+      return false;
+    };
     try {
       const tab = tabsRef.current.find((item) => item.id === taskId);
       if (!tab) {
@@ -1010,13 +1139,20 @@ export const useOrchestrator = () => {
         await sleep(150);
       }
 
-      await sleep(plan.launchDelayMs);
-      window.electronAPI.writePty(taskId, `\u0015clear && echo "Handover initiated..." && ${plan.launchCommand}\r`);
+      await sleep(Math.min(plan.launchDelayMs, 160));
+      const launchDispatch = await runHiddenLine(plan.launchCommand, tab.worktreePath);
+      if (!launchDispatch.success) {
+        return { success: false, error: launchDispatch.error || 'Failed to launch target agent.' };
+      }
       if (!plan.inlineTransfer) {
-        await sleep(plan.transferDelayMs);
+        await waitForAgentMode(Math.min(2400, plan.transferDelayMs + 500));
+        await sleep(120);
         const sanitizedTransferLine = plan.transferLine.replace(/[\r\n]+/g, ' ').trim();
         if (sanitizedTransferLine) {
-          window.electronAPI.writePty(taskId, `${sanitizedTransferLine}\r`);
+          const transferDispatch = await runHiddenLine(sanitizedTransferLine, tab.worktreePath);
+          if (!transferDispatch.success) {
+            return { success: false, error: transferDispatch.error || 'Failed to deliver handover packet.' };
+          }
         }
       }
 
@@ -1693,13 +1829,33 @@ export const useOrchestrator = () => {
       if (!tabExists) return;
       const usage = extractTaskUsage(payload);
       if (!usage) return;
-      setTaskUsage(prev => ({
-        ...prev,
-        [taskId]: {
-          ...(prev[taskId] || {}),
-          ...usage
+      const now = Date.now();
+      setTaskUsage(prev => {
+        const previousTaskUsage = prev[taskId];
+        const nextTaskUsage: TaskUsage = {
+          ...(previousTaskUsage || {}),
+          ...usage,
+          updatedAt: now
+        };
+
+        if (!hasMeaningfulTaskUsageChange(previousTaskUsage, nextTaskUsage)) {
+          return prev;
         }
-      }));
+
+        const previousUpdatedAt = typeof previousTaskUsage?.updatedAt === 'number'
+          ? previousTaskUsage.updatedAt
+          : 0;
+        const elapsedMs = now - previousUpdatedAt;
+        const isBurstUpdate = elapsedMs > 0 && elapsedMs < 250;
+        if (isBurstUpdate && !hasLargeTaskUsageDelta(previousTaskUsage, nextTaskUsage)) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [taskId]: nextTaskUsage
+        };
+      });
     };
 
     const unsubAgentMessage = window.electronAPI.onAgentMessage((req) => {
@@ -1945,6 +2101,7 @@ export const useOrchestrator = () => {
       dismissLivingSpecSelectionPrompt,
       dismissAttentionEvent,
       clearAttentionEvents,
+      forgetProjectState,
       createTask,
       renameTaskSession,
       setTaskTags,

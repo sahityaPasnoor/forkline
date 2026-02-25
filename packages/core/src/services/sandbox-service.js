@@ -26,6 +26,12 @@ const resolveSandboxMode = (env) => {
 };
 
 const escapeForSeatbelt = (value) => String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+const withSandboxShellEnv = (env) => {
+  const merged = { ...(env || {}) };
+  merged.ZDOTDIR = '/tmp';
+  merged.HISTFILE = '/tmp/.zsh_history';
+  return merged;
+};
 
 const buildSeatbeltProfile = (cwd, denyNetwork) => {
   const escapedCwd = escapeForSeatbelt(path.resolve(cwd));
@@ -39,10 +45,7 @@ const buildSeatbeltProfile = (cwd, denyNetwork) => {
 
   return [
     '(version 1)',
-    '(deny default)',
-    '(import "system.sb")',
-    '(allow process*)',
-    '(allow file-read*)',
+    '(allow default)',
     `(allow file-write* (subpath "${escapedCwd}") (subpath "${escapedTmp}") (subpath "${escapedPrivateTmp}"))`,
     `(deny file-read* (subpath "${escapedSsh}"))`,
     `(deny file-read* (subpath "${escapedShellRc}"))`,
@@ -73,7 +76,7 @@ const resolveSandboxLaunch = ({ shell, cwd, env }) => {
     return {
       command: 'sandbox-exec',
       args: ['-p', profile, shell],
-      env,
+      env: withSandboxShellEnv(env),
       sandbox: { mode: 'seatbelt', active: true, denyNetwork }
     };
   }
@@ -99,7 +102,7 @@ const resolveSandboxLaunch = ({ shell, cwd, env }) => {
     return {
       command: 'firejail',
       args,
-      env,
+      env: withSandboxShellEnv(env),
       sandbox: { mode: 'firejail', active: true, denyNetwork }
     };
   }

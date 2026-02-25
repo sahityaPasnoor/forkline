@@ -5,7 +5,6 @@ Forkline is a local-first orchestration platform for running many local coding a
 Runtime support tier:
 - `core` (stable): headless daemon for PTY + Git orchestration
 - `gui` (stable): Electron + React command center
-- `tui` (experimental): terminal client on top of core
 
 ## What Problem Forkline Solves
 
@@ -18,18 +17,32 @@ When teams run multiple headless agents on one repo, they usually hit the same f
 
 Forkline solves this by making `worktree isolation + PTY state + operator control` first-class.
 
-## Why This Is Not Reinventing the Wheel
+## Why Forkline (Not Another Agent)
 
-Forkline is not a replacement for your model CLI (Claude, Aider, Codex, Gemini, etc). It is the orchestration layer above them.
+Forkline is not a replacement for your coding agent.
+Forkline is the orchestration layer on top of your existing agents and Git workflow.
 
-| Existing Tool | Great At | Missing For Multi-Agent Ops | Forkline Adds |
+### What stays the same
+
+- You keep your existing agent CLI/model choice.
+- You keep Git primitives (`git worktree`, branches, merges).
+- You keep local execution and local repository ownership.
+
+### What Forkline adds
+
+- Multi-agent control plane for one repo: spawn, monitor, merge, delete, restore.
+- Approval and blocked-action handling across all running tasks.
+- Persistent PTY/session state with fleet-level visibility and replayable history.
+
+### Quick comparison
+
+| Existing approach | Strong at | Gap for parallel agent operations | Forkline adds |
 |---|---|---|---|
-| Raw terminal / tmux | shell power | no structured task model, no cross-session fleet state | persistent task/session graph + worktree/task lifecycle |
-| Plain `git worktree` | branch isolation | manual plumbing, no operator UX | automated spawn/merge/delete + inventory + restore |
-| Single-agent IDE plugin | focused coding loop | weak parallel fleet control across many agents | fleet-level observability and blocked-action handling |
-| Agent CLIs themselves | code generation/editing | no global orchestrator policy and no multi-agent control plane | shared control plane, approvals, collision/status wiring |
+| Agent apps/plugins | Single-agent coding loop | Weak global control across many tasks/worktrees | One operator surface for many agents in parallel |
+| Raw terminal + `git worktree` | Maximum flexibility | Manual coordination and low observability | Structured lifecycle and persistent state |
+| Agent frameworks/SDKs | Building custom systems | Extra engineering to operate daily coding flows | Ready local operator runtime for day-to-day usage |
 
-Forkline's unique wedge: **local-first, model-agnostic, worktree-native multi-agent orchestration with persistent PTY/session semantics**.
+Forkline's wedge: **local-first, model-agnostic, worktree-native multi-agent orchestration with persistent PTY/session semantics**.
 
 ## Core Capabilities
 
@@ -90,8 +103,8 @@ Electron AgentControlServer (GUI mode)
     +--> Git manager (simple-git + worktrees)
     +--> Fleet store (sql.js)
 
-Core/TUI mode:
-TUI <-> Core Daemon (HTTP + SSE, token-auth) <-> PTY/Git services
+Core mode:
+Core Daemon (HTTP + SSE, token-auth) <-> PTY/Git services
 ```
 
 ## Install
@@ -101,19 +114,40 @@ Requirements:
 - npm `10+`
 - Git in `PATH`
 
+### Source install (current recommended path)
+
 ```bash
 npm ci
 ```
 
+### npm package status
+
+As of February 25, 2026, `forkline` is not published on npm yet (`npm install -g forkline` returns `404`).
+
+### Production-style local package test
+
+```bash
+npm pack
+npm install -g --offline ./forkline-<version>.tgz
+```
+
 ## Run
 
-### GUI development
+### GUI development (from source)
 
 ```bash
 npm run dev
 ```
 
-### Core daemon (headless)
+### GUI packaged command
+
+```bash
+forkline
+```
+
+`forkline` launches local Electron when available, and falls back to `npx electron@35.7.5` when Electron is not installed.
+
+### Core daemon (headless, from source)
 
 ```bash
 npm run core:start
@@ -123,27 +157,10 @@ On first run, core creates `~/.forkline/core.token` (0600). You can override wit
 - `FORKLINE_CORE_TOKEN`
 - `FORKLINE_CORE_TOKEN_FILE`
 
-### TUI client
+### Core daemon (headless, packaged command)
 
 ```bash
-npm run tui:start:experimental
-```
-
-TUI reads auth token from:
-1. `FORKLINE_CORE_TOKEN`
-2. `FORKLINE_CORE_TOKEN_FILE`
-3. `~/.forkline/core.token`
-
-Optional:
-- `FORKLINE_CORE_URL` (default `http://127.0.0.1:34600`)
-- `FORKLINE_TUI_AGENT` (default `shell`)
-
-TUI is currently experimental. Expect API/UX changes.
-
-### GUI command
-
-```bash
-npm run gui:start
+forkline-core
 ```
 
 ## Build and Package
@@ -153,6 +170,17 @@ npm run typecheck
 npm run build
 npm run dist:local
 ```
+
+## App Branding Configuration
+
+Edit [`config/app-branding.json`](config/app-branding.json) to configure:
+- app display name
+- default tagline
+- logo filename (served from `public/`)
+
+Current logo assets:
+- app: `public/logo.svg`
+- docs: `docs/public/logo.svg`
 
 ## Quality Gates
 
@@ -191,7 +219,6 @@ curl -i -H "Origin: https://evil.example" -H "Authorization: Bearer $TOKEN" http
 ## Repository Structure
 
 - `packages/core/` headless daemon + PTY/Git services
-- `packages/tui/` experimental terminal client
 - `packages/protocol/` shared contract (routes/events/quick-actions)
 - `electron/` Electron main/preload/server/store
 - `src/` React renderer
@@ -222,13 +249,12 @@ Forkline ships a full docs site for operators and contributors:
 - Build: `npm run docs:build`
 - Preview: `npm run docs:preview`
 
-Primary sections:
+Primary pages:
 
-- Guide (`docs/guide/`)
-- Architecture (`docs/architecture/`)
-- API Reference (`docs/reference/`)
-- Operations (`docs/operations/`)
-- Community (`docs/community/`)
+- Getting started (`docs/guide/getting-started.md`)
+- How to use (`docs/guide/how-to-use.md`)
+- Architecture (`docs/architecture/overview.md`)
+- Core API (`docs/reference/core-api.md`)
 
 ## License
 

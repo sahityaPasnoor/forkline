@@ -15,6 +15,9 @@ const shell = os.platform() === 'win32' ? 'powershell.exe' : process.env.SHELL |
 const MAX_OUTPUT_BUFFER = 2_000_000;
 const MAX_TRIM_BOUNDARY_SCAN = 4096;
 const DEFAULT_MAX_SESSIONS = 256;
+const DUPLICATE_LINE_WRITE_WINDOW_MS = 100;
+const HIDDEN_COMMAND_ECHO_TTL_MS = 1600;
+const HIDDEN_COMMAND_ECHO_MAX_BUFFER = 64_000;
 const TASK_ID_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
 const MAX_ENV_KEYS = 128;
 const MAX_ENV_VALUE_BYTES = 4096;
@@ -34,6 +37,37 @@ const normalizePersistenceMode = (value) => {
 };
 
 const shellQuote = (value) => `'${String(value || '').replace(/'/g, `'\"'\"'`)}'`;
+const escapeRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const normalizeEchoProbeText = (value) => String(value || '')
+  .replace(/\x1b\][^\u0007]*(?:\u0007|\x1b\\)/g, ' ')
+  .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ' ')
+  .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .toLowerCase();
+const compactEchoSignature = (value) => normalizeEchoProbeText(value).replace(/[^a-z0-9]/g, '');
+const looksLikeHiddenCommandEchoLine = (line, tracker) => {
+  const probeLine = normalizeEchoProbeText(line);
+  if (!probeLine) return false;
+  if (tracker.commandProbe && probeLine.includes(tracker.commandProbe)) return true;
+  const compactLine = compactEchoSignature(probeLine);
+  return !!tracker.compactSignature && compactLine.includes(tracker.compactSignature);
+};
+
+const buildHiddenCommandEchoMatchers = (command) => {
+  const normalized = String(command || '').replace(/\r/g, '').trim();
+  if (!normalized) return null;
+  const chars = Array.from(normalized).map((ch) => escapeRegExp(ch));
+  const joined = chars.join('(?:\\r?\\n|\\r)?');
+  const linePattern = new RegExp(`(?:^|[\\r\\n]).{0,2400}?${joined}(?:\\r?\\n|\\r|$)`, 'm');
+  const rawPattern = new RegExp(joined, 'm');
+  return {
+    linePattern,
+    rawPattern,
+    commandProbe: normalizeEchoProbeText(normalized),
+    compactSignature: compactEchoSignature(normalized)
+  };
+};
 
 class PtyService extends EventEmitter {
   constructor(options = {}) {
@@ -77,6 +111,91 @@ class PtyService extends EventEmitter {
     if (currentProvider === nextProvider) return;
     const transition = session.modeMachine.transition({ provider: nextProvider });
     this.emitModeChange(session.taskId, session, transition, { force: transition.changed });
+  }
+
+  trackHiddenCommandEcho(session, command) {
+    if (!session) return;
+    const matchers = buildHiddenCommandEchoMatchers(command);
+    if (!matchers) {
+      session.hiddenCommandEcho = null;
+      return;
+    }
+    session.hiddenCommandEcho = {
+      ...matchers,
+      carry: '',
+      remainingMatches: 2,
+      expiresAt: Date.now() + HIDDEN_COMMAND_ECHO_TTL_MS
+    };
+  }
+
+  filterHiddenCommandEcho(session, chunk) {
+    const tracker = session?.hiddenCommandEcho;
+    if (!tracker) return String(chunk || '');
+    const incoming = String(chunk || '');
+    const merged = `${tracker.carry || ''}${incoming}`;
+    tracker.carry = '';
+    if (!merged) return '';
+
+    if (Date.now() > tracker.expiresAt) {
+      session.hiddenCommandEcho = null;
+      return merged;
+    }
+
+    let filtered = merged;
+    let strippedAny = false;
+    while ((tracker.remainingMatches || 0) > 0) {
+      const match = filtered.match(tracker.linePattern) || filtered.match(tracker.rawPattern);
+      if (!match || typeof match.index !== 'number') break;
+      const start = match.index;
+      const end = start + match[0].length;
+      filtered = filtered.slice(0, start) + filtered.slice(end);
+      strippedAny = true;
+      tracker.remainingMatches -= 1;
+    }
+
+    const hasNewline = filtered.includes('\n');
+    if ((tracker.remainingMatches || 0) > 0 && hasNewline) {
+      const firstLineEnd = filtered.indexOf('\n');
+      if (firstLineEnd >= 0) {
+        const firstLine = filtered.slice(0, firstLineEnd + 1);
+        if (looksLikeHiddenCommandEchoLine(firstLine, tracker)) {
+          filtered = filtered.slice(firstLineEnd + 1);
+          strippedAny = true;
+          tracker.remainingMatches -= 1;
+        }
+      }
+    }
+
+    if ((tracker.remainingMatches || 0) <= 0) {
+      session.hiddenCommandEcho = null;
+      return filtered;
+    }
+
+    if (!hasNewline && filtered.length < HIDDEN_COMMAND_ECHO_MAX_BUFFER) {
+      tracker.carry = filtered;
+      return '';
+    }
+
+    if (!hasNewline && filtered.length >= HIDDEN_COMMAND_ECHO_MAX_BUFFER) {
+      session.hiddenCommandEcho = null;
+      return filtered;
+    }
+
+    if (hasNewline && !strippedAny) {
+      session.hiddenCommandEcho = null;
+      return filtered;
+    }
+
+    if (hasNewline && strippedAny) {
+      const hasVisibleOutput = normalizeEchoProbeText(filtered).length > 0;
+      if (hasVisibleOutput) {
+        session.hiddenCommandEcho = null;
+      }
+      return filtered;
+    }
+
+    session.hiddenCommandEcho = null;
+    return filtered;
   }
 
   emitModeChange(taskId, session, transition, options = {}) {
@@ -250,13 +369,18 @@ class PtyService extends EventEmitter {
       const current = this.sessions.get(taskId);
       if (!current || current.ptyProcess !== processRef) return;
       current.lastActivityAt = Date.now();
-      current.outputBuffer = this.trimBuffer(current.outputBuffer + data);
-      this.emit('data', { taskId, data });
+      const filteredData = this.filterHiddenCommandEcho(current, data);
+      if (!filteredData) {
+        this.emit('activity', { taskId, at: current.lastActivityAt });
+        return;
+      }
+      current.outputBuffer = this.trimBuffer(current.outputBuffer + filteredData);
+      this.emit('data', { taskId, data: filteredData });
       this.emit('activity', { taskId, at: current.lastActivityAt });
 
-      current.altScreen = this.updateAltScreenState(current.altScreen, data);
+      current.altScreen = this.updateAltScreenState(current.altScreen, filteredData);
       this.ensureModeMachine(current);
-      const transition = current.modeMachine.consumeOutput(data, { altScreen: current.altScreen });
+      const transition = current.modeMachine.consumeOutput(filteredData, { altScreen: current.altScreen });
       this.emitModeChange(taskId, current, transition);
     });
 
@@ -401,10 +525,10 @@ class PtyService extends EventEmitter {
       if (!existing.ptyProcess) {
         const restarted = this.startPtyForSession(taskId);
         this.emit('state', { taskId, created: false, running: restarted, restarted, subscriberId });
-        return { created: false, running: restarted, restarted };
+        return { created: false, running: restarted, restarted, sandbox: existing.sandbox || null };
       }
       this.emit('state', { taskId, created: false, running: true, restarted: false, subscriberId });
-      return { created: false, running: true, restarted: false };
+      return { created: false, running: true, restarted: false, sandbox: existing.sandbox || null };
     }
 
     if (this.sessions.size >= this.maxSessions) {
@@ -431,10 +555,12 @@ class PtyService extends EventEmitter {
         agentCommand: sanitizedEnv.FORKLINE_AGENT_COMMAND || sanitizedEnv.FORKLINE_AGENT || ''
       }),
       modeSnapshot: null,
+      hiddenCommandEcho: null,
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       exitCode: null,
       exitSignal: undefined,
+      lastWrite: { payload: '', at: 0 },
       resource: this.resourceAllocator.allocate(taskId),
       sandbox: null,
       persistence: this.shouldUseTmuxPersistence({}) ? { mode: 'tmux', tmuxSession: `forkline_${taskId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48)}` } : null,
@@ -449,7 +575,7 @@ class PtyService extends EventEmitter {
     this.ensureModeMachine(session, sanitizedEnv);
     const started = this.startPtyForSession(taskId);
     this.emit('state', { taskId, created: true, running: started, restarted: false, subscriberId });
-    return { created: true, running: started, restarted: false };
+    return { created: true, running: started, restarted: false, sandbox: session.sandbox || null };
   }
 
   attach(taskId, subscriberId = 'default') {
@@ -469,7 +595,8 @@ class PtyService extends EventEmitter {
       provider: session.modeSnapshot?.provider,
       running: !!session.ptyProcess,
       exitCode: session.exitCode,
-      signal: session.exitSignal
+      signal: session.exitSignal,
+      sandbox: session.sandbox || null
     };
   }
 
@@ -485,11 +612,62 @@ class PtyService extends EventEmitter {
     if (!session || !session.ptyProcess) {
       return { success: false, error: 'PTY is not running for this task.' };
     }
-    session.lastActivityAt = Date.now();
+    const now = Date.now();
+    const previousWrite = session.lastWrite || { payload: '', at: 0 };
+    const isFullLineInput = typeof data === 'string' && /[\r\n]$/.test(data) && data.trim().length > 1;
+    const isDuplicateLineWrite = isFullLineInput
+      && previousWrite.payload === data
+      && (now - previousWrite.at) <= DUPLICATE_LINE_WRITE_WINDOW_MS;
+    if (isDuplicateLineWrite) {
+      session.lastActivityAt = now;
+      this.emit('activity', { taskId, at: session.lastActivityAt });
+      return { success: true, deduped: true };
+    }
+
+    session.lastWrite = {
+      payload: typeof data === 'string' ? data : '',
+      at: now
+    };
+    session.lastActivityAt = now;
     session.ptyProcess.write(data);
     this.ensureModeMachine(session);
     const transition = session.modeMachine.consumeInput(data);
     this.emitModeChange(taskId, session, transition);
+    this.emit('activity', { taskId, at: session.lastActivityAt });
+    return { success: true };
+  }
+
+  launch(taskId, command, options = {}) {
+    const session = this.sessions.get(taskId);
+    if (!session) {
+      return { success: false, error: 'Session not found for this task.' };
+    }
+    if (!session.ptyProcess) {
+      const started = this.startPtyForSession(taskId);
+      if (!started || !session.ptyProcess) {
+        return { success: false, error: 'PTY is not running for this task.' };
+      }
+    }
+    const normalizedCommand = String(command || '').trim();
+    if (!normalizedCommand) {
+      return { success: false, error: 'Launch command is required.' };
+    }
+    if (Buffer.byteLength(normalizedCommand, 'utf8') > 4096) {
+      return { success: false, error: 'Launch command is too large.' };
+    }
+
+    if (options?.suppressEcho !== false) {
+      this.trackHiddenCommandEcho(session, normalizedCommand);
+    } else {
+      session.hiddenCommandEcho = null;
+    }
+
+    session.lastWrite = {
+      payload: `${normalizedCommand}\r`,
+      at: Date.now()
+    };
+    session.lastActivityAt = session.lastWrite.at;
+    session.ptyProcess.write(`${normalizedCommand}\r`);
     this.emit('activity', { taskId, at: session.lastActivityAt });
     return { success: true };
   }
@@ -532,10 +710,11 @@ class PtyService extends EventEmitter {
     session.modeSnapshot = session.modeMachine.snapshot();
     session.isBlocked = false;
     session.blockedReason = undefined;
+    session.hiddenCommandEcho = null;
 
     const restarted = this.startPtyForSession(taskId);
     this.emit('state', { taskId, created: false, running: restarted, restarted: true, subscriberId });
-    return { success: true, running: restarted, restarted: true };
+    return { success: true, running: restarted, restarted: true, sandbox: session.sandbox || null };
   }
 
   destroy(taskId) {

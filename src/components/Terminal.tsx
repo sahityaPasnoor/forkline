@@ -15,6 +15,7 @@ interface TerminalProps {
   context?: string;
   envVars?: string;
   prompt?: string;
+  launchCommandOverride?: string;
   projectPath: string;
   parentBranch?: string;
   livingSpecPreference?: LivingSpecPreference;
@@ -50,6 +51,20 @@ interface PtyModeSnapshot {
   modeSeq: number;
   isBlocked: boolean;
   blockedReason?: string;
+}
+
+type RelaunchPhase = 'restoring' | 'preparing_workspace' | 'launching_agent';
+
+interface RelaunchProgressState {
+  phase: RelaunchPhase;
+  detail?: string;
+}
+
+interface PtySandboxSnapshot {
+  mode: string;
+  active: boolean;
+  warning?: string;
+  denyNetwork?: boolean;
 }
 
 const isShellLikeMode = (mode: string) => mode === 'shell' || mode === 'exited';
@@ -228,6 +243,7 @@ const areTerminalPropsEqual = (prev: TerminalProps, next: TerminalProps) => (
   && prev.context === next.context
   && prev.envVars === next.envVars
   && prev.prompt === next.prompt
+  && prev.launchCommandOverride === next.launchCommandOverride
   && prev.projectPath === next.projectPath
   && prev.parentBranch === next.parentBranch
   && isLivingSpecPreferenceEqual(prev.livingSpecPreference, next.livingSpecPreference)
@@ -315,6 +331,7 @@ const Terminal: React.FC<TerminalProps> = ({
   context,
   envVars,
   prompt,
+  launchCommandOverride,
   projectPath,
   parentBranch,
   livingSpecPreference,
@@ -338,6 +355,8 @@ const Terminal: React.FC<TerminalProps> = ({
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<XTerm | null>(null);
   const fitAddonInstance = useRef<FitAddon | null>(null);
+  const fitFrameRef = useRef<number | null>(null);
+  const lastFittedSizeRef = useRef<{ cols: number; rows: number }>({ cols: 0, rows: 0 });
   const controlTaskUrlRef = useRef(fallbackTaskControlUrl);
   const controlAuthTokenRef = useRef('');
   const ptyEnvRef = useRef<Record<string, string> | null>(null);
@@ -354,7 +373,11 @@ const Terminal: React.FC<TerminalProps> = ({
   const pendingShellPlanRef = useRef<PendingShellPlan | null>(null);
   const [terminalMode, setTerminalMode] = useState('booting');
   const [quickActionNotice, setQuickActionNotice] = useState<string | null>(null);
+  const [relaunchProgress, setRelaunchProgress] = useState<RelaunchProgressState | null>(null);
+  const [sandboxSnapshot, setSandboxSnapshot] = useState<PtySandboxSnapshot | null>(null);
+  const [showSessionLoadProgress, setShowSessionLoadProgress] = useState(false);
   const quickActionNoticeTimeoutRef = useRef<number | null>(null);
+  const sessionLoadProgressTimerRef = useRef<number | null>(null);
   const isDisposedRef = useRef(false);
   const pendingPtyContinuationsRef = useRef<PendingPtyContinuation[]>([]);
   const shellInputCarryRef = useRef('');
@@ -390,6 +413,112 @@ const Terminal: React.FC<TerminalProps> = ({
     if (agentLikelyActiveRef.current === next) return;
     agentLikelyActiveRef.current = next;
   }, []);
+  const setRelaunchProgressPhase = useCallback((phase: RelaunchPhase, detail?: string) => {
+    setRelaunchProgress({ phase, detail });
+  }, []);
+  const clearRelaunchProgress = useCallback(() => {
+    setRelaunchProgress(null);
+  }, []);
+  const relaunchProgressMeta = useMemo(() => {
+    if (!relaunchProgress) return null;
+    if (relaunchProgress.phase === 'restoring') return { label: 'Restoring session', percent: 30 };
+    if (relaunchProgress.phase === 'preparing_workspace') return { label: 'Preparing workspace metadata', percent: 65 };
+    return { label: 'Relaunching agent', percent: 92 };
+  }, [relaunchProgress]);
+  const startupProgressMeta = useMemo(() => {
+    if (relaunchProgress && relaunchProgressMeta) {
+      return {
+        label: relaunchProgressMeta.label,
+        percent: relaunchProgressMeta.percent,
+        detail: relaunchProgress.detail
+      };
+    }
+    if (!showSessionLoadProgress) return null;
+    return {
+      label: 'Loading session',
+      percent: 24,
+      detail: 'Attaching PTY and restoring task state for this tab.'
+    };
+  }, [relaunchProgress, relaunchProgressMeta, showSessionLoadProgress]);
+  const dispatchRelaunchCommand = useCallback((command: string) => {
+    const normalizedCommand = String(command || '').trim();
+    if (!normalizedCommand) return;
+    const MAX_ATTEMPTS = 8;
+    const tryLaunch = (attempt = 0) => {
+      void window.electronAPI.launchPty(taskId, normalizedCommand, { suppressEcho: true })
+        .then((result) => {
+          if (result?.success) return;
+          const message = String(result?.error || '');
+          if (attempt < MAX_ATTEMPTS && /not running|session not found/i.test(message)) {
+            const relaunchEnv = ptyEnvRef.current || {};
+            window.electronAPI.createPty(taskId, cwd, relaunchEnv);
+            window.setTimeout(() => {
+              if (isDisposedRef.current) return;
+              tryLaunch(attempt + 1);
+            }, Math.min(1200, 140 * (attempt + 1)));
+            return;
+          }
+          clearRelaunchProgress();
+          setAgentModeLikely(false);
+          terminalInstance.current?.writeln(`\r\n[orchestrator] Failed to relaunch agent: ${message || 'unknown error'}`);
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : 'unknown error';
+          clearRelaunchProgress();
+          setAgentModeLikely(false);
+          terminalInstance.current?.writeln(`\r\n[orchestrator] Failed to relaunch agent: ${message}`);
+        });
+    };
+    tryLaunch(0);
+  }, [taskId, cwd, clearRelaunchProgress, setAgentModeLikely]);
+  const beginSessionLoadProgress = useCallback(() => {
+    if (sessionLoadProgressTimerRef.current !== null) {
+      window.clearTimeout(sessionLoadProgressTimerRef.current);
+      sessionLoadProgressTimerRef.current = null;
+    }
+    sessionLoadProgressTimerRef.current = window.setTimeout(() => {
+      setShowSessionLoadProgress(true);
+      sessionLoadProgressTimerRef.current = null;
+    }, 60);
+  }, []);
+  const clearSessionLoadProgress = useCallback(() => {
+    if (sessionLoadProgressTimerRef.current !== null) {
+      window.clearTimeout(sessionLoadProgressTimerRef.current);
+      sessionLoadProgressTimerRef.current = null;
+    }
+    setShowSessionLoadProgress(false);
+  }, []);
+  const sandboxBanner = useMemo(() => {
+    if (!sandboxSnapshot) return null;
+    const mode = String(sandboxSnapshot.mode || 'sandbox').toLowerCase();
+    const modeLabel = mode === 'off' ? 'Sandbox' : `Sandbox (${mode})`;
+    const warning = typeof sandboxSnapshot.warning === 'string' ? sandboxSnapshot.warning.trim() : '';
+    if (warning) {
+      return {
+        tone: 'warning' as const,
+        message: `${modeLabel}: ${warning}`
+      };
+    }
+    if (sandboxSnapshot.active && sandboxSnapshot.denyNetwork) {
+      return {
+        tone: 'warning' as const,
+        message: `${modeLabel} is active. Outbound network is blocked for this session.`
+      };
+    }
+    if (sandboxSnapshot.active) {
+      return {
+        tone: 'info' as const,
+        message: `${modeLabel} is active for this terminal session.`
+      };
+    }
+    if (sandboxSnapshot.denyNetwork) {
+      return {
+        tone: 'warning' as const,
+        message: 'Network guard was requested but could not be enforced for this session.'
+      };
+    }
+    return null;
+  }, [sandboxSnapshot]);
 
   const ensureCursorVisible = useCallback(() => {
     if (!ptyRunningRef.current) return;
@@ -400,6 +529,29 @@ const Terminal: React.FC<TerminalProps> = ({
     // Keep cursor recovery local to xterm so control bytes are not injected into agent input.
     terminalInstance.current?.write('\u001b[?25h');
   }, []);
+  const fitTerminalToContainer = useCallback(() => {
+    const fitAddon = fitAddonInstance.current;
+    const terminal = terminalInstance.current;
+    if (!fitAddon || !terminal || isDisposedRef.current) return;
+    try {
+      fitAddon.fit();
+      const nextCols = terminal.cols;
+      const nextRows = terminal.rows;
+      const lastSize = lastFittedSizeRef.current;
+      if (nextCols === lastSize.cols && nextRows === lastSize.rows) return;
+      lastFittedSizeRef.current = { cols: nextCols, rows: nextRows };
+      window.electronAPI.resizePty(taskId, nextCols, nextRows);
+    } catch {
+      // Ignore fit/resize races while layout is settling.
+    }
+  }, [taskId]);
+  const scheduleTerminalFit = useCallback(() => {
+    if (fitFrameRef.current !== null) return;
+    fitFrameRef.current = requestAnimationFrame(() => {
+      fitFrameRef.current = null;
+      fitTerminalToContainer();
+    });
+  }, [fitTerminalToContainer]);
 
   const buildPtyEnv = useCallback((controlTaskUrl: string, controlAuthToken?: string) => {
     const customEnv: Record<string, string> = {
@@ -453,6 +605,10 @@ const Terminal: React.FC<TerminalProps> = ({
         window.clearTimeout(quickActionNoticeTimeoutRef.current);
         quickActionNoticeTimeoutRef.current = null;
       }
+      if (sessionLoadProgressTimerRef.current !== null) {
+        window.clearTimeout(sessionLoadProgressTimerRef.current);
+        sessionLoadProgressTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -499,19 +655,26 @@ const Terminal: React.FC<TerminalProps> = ({
     setTerminalMode(mode);
 
     if (snapshot.isBlocked) {
+      clearRelaunchProgress();
       setAgentModeLikely(true);
       return;
     }
 
     if (isShellLikeMode(mode)) {
+      clearRelaunchProgress();
       setAgentModeLikely(false);
       ensureCursorVisible();
       return;
     }
-    if (isAgentLikeMode(mode) || mode === 'booting') {
+    if (isAgentLikeMode(mode)) {
+      clearRelaunchProgress();
+      setAgentModeLikely(true);
+      return;
+    }
+    if (mode === 'booting') {
       setAgentModeLikely(true);
     }
-  }, [ensureCursorVisible, setAgentModeLikely]);
+  }, [clearRelaunchProgress, ensureCursorVisible, setAgentModeLikely]);
 
   useEffect(() => {
     const term = terminalInstance.current;
@@ -527,36 +690,14 @@ const Terminal: React.FC<TerminalProps> = ({
 
     const rafId = requestAnimationFrame(() => {
       const terminal = terminalInstance.current;
-      const fitAddon = fitAddonInstance.current;
       if (!terminal || isDisposedRef.current) return;
-      try {
-        fitAddon?.fit();
-        window.electronAPI.resizePty(taskId, terminal.cols, terminal.rows);
-      } catch {
-        // Ignore fit/resize races while pane visibility is changing.
-      }
+      scheduleTerminalFit();
       terminal.focus();
       // Restore local cursor visibility only for shell prompts.
       ensureCursorVisible();
     });
     return () => cancelAnimationFrame(rafId);
-  }, [isActive, taskId, ensureCursorVisible]);
-
-  useEffect(() => {
-    if (!isActive) return;
-    const rafId = requestAnimationFrame(() => {
-      const term = terminalInstance.current;
-      const fitAddon = fitAddonInstance.current;
-      if (!term || !fitAddon || isDisposedRef.current) return;
-      try {
-        fitAddon.fit();
-        window.electronAPI.resizePty(taskId, term.cols, term.rows);
-      } catch {
-        // Ignore fit races while terminal overlays settle.
-      }
-    });
-    return () => cancelAnimationFrame(rafId);
-  }, [taskId, isActive, quickActionNotice, effectiveBlocked, usageSummaryLabel, usageCostLabel, usageUpdatedLabel]);
+  }, [isActive, ensureCursorVisible, scheduleTerminalFit]);
 
   useEffect(() => {
     const next = `http://127.0.0.1:34567/api/task/${taskId}`;
@@ -589,6 +730,8 @@ const Terminal: React.FC<TerminalProps> = ({
 
   useEffect(() => {
     if (!terminalRef.current || isInitialized.current) return;
+    setSandboxSnapshot(null);
+    beginSessionLoadProgress();
 
     let term: XTerm | null = null;
     let fitAddon: FitAddon | null = null;
@@ -700,10 +843,21 @@ const Terminal: React.FC<TerminalProps> = ({
         });
 
         removePtyListener = window.electronAPI.onPtyData(taskId, (data) => {
+          clearSessionLoadProgress();
           term?.write(data);
         });
-        removePtyStateListener = window.electronAPI.onPtyState(taskId, ({ created, running, restarted }) => {
+        removePtyStateListener = window.electronAPI.onPtyState(taskId, ({ created, running, restarted, sandbox }) => {
           if (disposed || isDisposedRef.current) return;
+          if (sandbox && typeof sandbox === 'object') {
+            setSandboxSnapshot({
+              mode: typeof sandbox.mode === 'string' ? sandbox.mode : 'off',
+              active: !!sandbox.active,
+              warning: typeof sandbox.warning === 'string' ? sandbox.warning : undefined,
+              denyNetwork: !!sandbox.denyNetwork
+            });
+          } else if (created) {
+            setSandboxSnapshot(null);
+          }
           ptyRunningRef.current = !!running;
           ptyStartInFlightRef.current = false;
           if (running) {
@@ -722,23 +876,28 @@ const Terminal: React.FC<TerminalProps> = ({
             && isResumeEligibleMode(terminalModeRef.current);
           const shouldRelaunchRestoredTab = !currentShouldBootstrap && (!!created || !!restarted || restoredSessionAtShellLikeMode);
           if (!currentShouldBootstrap && !shouldRelaunchRestoredTab) {
-            term?.writeln('\r\n[orchestrator] Restored tab session attached. Agent bootstrap was skipped to preserve prior context.');
+            clearRelaunchProgress();
+            clearSessionLoadProgress();
             return;
           }
           if (shouldRelaunchRestoredTab) {
             const reason = created
-              ? 'No live PTY session was found'
+              ? 'previous PTY session was missing'
               : (restarted
-                ? 'Previous PTY session is not live'
+                ? 'previous PTY session was not live'
                 : (terminalModeRef.current === 'booting'
-                  ? 'Restored terminal mode is not resolved yet'
-                  : 'Restored terminal is at a shell prompt'));
-            term?.writeln(`\r\n[orchestrator] ${reason}. Relaunching agent for this tab.`);
+                  ? 'restored terminal mode was unresolved'
+                  : 'restored terminal was at a shell prompt'));
+            setRelaunchProgressPhase('restoring', reason);
           }
           window.setTimeout(() => {
             if (disposed || isDisposedRef.current) return;
             const taskControlUrl = controlTaskUrlRef.current;
+            const launchPlan = currentShouldBootstrap && launchCommandOverride?.trim()
+              ? { command: launchCommandOverride.trim() }
+              : buildAgentLaunchPlan(agentCommand, prompt);
             const apiDoc = `IDE Capabilities API\n--------------------\nYou are running inside Forkline.\nYou can interact with the IDE by sending HTTP requests to the local control server.\n\nBase URL: ${taskControlUrl}\nAuthentication:\n- Header: x-forkline-token: $MULTI_AGENT_IDE_TOKEN\n- Alternate: Authorization: Bearer $MULTI_AGENT_IDE_TOKEN\nCurrent Permissions:\n- Merge Request: ${capabilities?.autoMerge ? 'Auto-Approve' : 'Requires Human Approval'}\n\nWorkspace Metadata Paths:\n- Living Spec (if available): ${resolvedLivingSpecPath}\n- Memory Context: .agent_cache/agent_memory.md\n\nEndpoints:\n1. POST ${taskControlUrl}/merge (returns 202 + requestId)\n2. GET ${taskControlUrl.replace('/api/task/' + taskId, '')}/api/approval/:requestId (poll merge status)\n3. POST ${taskControlUrl}/todos\n4. POST ${taskControlUrl}/message\n5. POST ${taskControlUrl}/usage (or /metrics)\n\nMerge wait mode:\n- Use ${taskControlUrl}/merge?wait=1 to wait for a decision inline (times out after 10 minutes).\n\ncurl example:\ncurl -s -H \"x-forkline-token: $MULTI_AGENT_IDE_TOKEN\" -H \"content-type: application/json\" -X POST ${taskControlUrl}/todos -d '{\"todos\":[{\"id\":\"1\",\"title\":\"Implement fix\",\"status\":\"in_progress\"}]}'\n`;
+            setRelaunchProgressPhase('preparing_workspace');
             void window.electronAPI
               .prepareAgentWorkspace(
                 cwd,
@@ -746,7 +905,8 @@ const Terminal: React.FC<TerminalProps> = ({
                 context || '',
                 apiDoc,
                 livingSpecPreference,
-                livingSpecOverridePath
+                livingSpecOverridePath,
+                launchPlan.command
               )
               .then((prepRes) => {
                 if (disposed || isDisposedRef.current) return;
@@ -755,14 +915,14 @@ const Terminal: React.FC<TerminalProps> = ({
                   const message = prepRes?.error ? `Workspace metadata warning: ${prepRes.error}` : 'Workspace metadata preparation failed.';
                   term?.writeln(`\r\n[orchestrator] ${message}`);
                 }
-
-                const launchPlan = buildAgentLaunchPlan(agentCommand, prompt);
-
-                if (prompt) {
-                  window.electronAPI.writePty(taskId, `clear && echo -e "\\033[1;37m[Orchestrator]\\033[0m Bootstrapping task..." && ${launchPlan.command}\r`);
-                } else {
-                  window.electronAPI.writePty(taskId, `clear && ${launchPlan.command}\r`);
-                }
+                const launchScriptPath = typeof prepRes?.launchScriptPath === 'string'
+                  ? prepRes.launchScriptPath.trim().replace(/\\/g, '/')
+                  : '';
+                const resolvedLaunchCommand = launchScriptPath.startsWith('.agent_cache/')
+                  ? `./${launchScriptPath}`
+                  : launchPlan.command;
+                setRelaunchProgressPhase('launching_agent');
+                dispatchRelaunchCommand(resolvedLaunchCommand);
                 setAgentModeLikely(true);
                 lastAgentLaunchAtRef.current = Date.now();
                 onBootstrappedRef.current?.(taskId);
@@ -771,14 +931,8 @@ const Terminal: React.FC<TerminalProps> = ({
                 if (disposed || isDisposedRef.current) return;
                 console.error('Failed to prepare workspace metadata:', err);
                 term?.writeln('\r\n[orchestrator] Workspace metadata setup failed. Continuing.');
-
-                const launchPlan = buildAgentLaunchPlan(agentCommand, prompt);
-
-                if (prompt) {
-                  window.electronAPI.writePty(taskId, `clear && echo -e "\\033[1;37m[Orchestrator]\\033[0m Bootstrapping task..." && ${launchPlan.command}\r`);
-                } else {
-                  window.electronAPI.writePty(taskId, `clear && ${launchPlan.command}\r`);
-                }
+                setRelaunchProgressPhase('launching_agent', 'workspace metadata setup failed; launching with fallback');
+                dispatchRelaunchCommand(launchPlan.command);
                 setAgentModeLikely(true);
                 lastAgentLaunchAtRef.current = Date.now();
                 onBootstrappedRef.current?.(taskId);
@@ -795,6 +949,8 @@ const Terminal: React.FC<TerminalProps> = ({
           });
         });
         removePtyExitListener = window.electronAPI.onPtyExit(taskId, ({ exitCode, signal }) => {
+          clearSessionLoadProgress();
+          clearRelaunchProgress();
           ptyRunningRef.current = false;
           ptyStartInFlightRef.current = false;
           didBootstrap = false;
@@ -865,14 +1021,7 @@ const Terminal: React.FC<TerminalProps> = ({
     };
 
     const handleResize = () => {
-      if (fitAddonInstance.current && terminalInstance.current) {
-        try {
-          fitAddonInstance.current.fit();
-          window.electronAPI.resizePty(taskId, terminalInstance.current.cols, terminalInstance.current.rows);
-        } catch (e) {
-          // Ignore fit race conditions while panes are resizing.
-        }
-      }
+      scheduleTerminalFit();
     };
 
     if (!initTerminal()) {
@@ -889,6 +1038,11 @@ const Terminal: React.FC<TerminalProps> = ({
       disposed = true;
       isDisposedRef.current = true;
       window.removeEventListener('resize', handleResize);
+      if (fitFrameRef.current !== null) {
+        cancelAnimationFrame(fitFrameRef.current);
+        fitFrameRef.current = null;
+      }
+      lastFittedSizeRef.current = { cols: 0, rows: 0 };
       if (focusRafId !== null) {
         cancelAnimationFrame(focusRafId);
       }
@@ -921,12 +1075,27 @@ const Terminal: React.FC<TerminalProps> = ({
       setHasLiveMode(false);
       setLiveBlockedState({ isBlocked: false, blockedReason: undefined });
       setTerminalMode('booting');
+      setSandboxSnapshot(null);
+      clearSessionLoadProgress();
       setAgentModeLikely(false);
+      clearRelaunchProgress();
       window.electronAPI.detachPty(taskId);
       if (term) term.dispose();
       isInitialized.current = false;
     };
-  }, [taskId, cwd, setAgentModeLikely, applyModeSnapshot, clearPendingShellPlan]);
+  }, [
+    taskId,
+    cwd,
+    setAgentModeLikely,
+    applyModeSnapshot,
+    clearPendingShellPlan,
+    clearRelaunchProgress,
+    setRelaunchProgressPhase,
+    scheduleTerminalFit,
+    beginSessionLoadProgress,
+    clearSessionLoadProgress,
+    dispatchRelaunchCommand
+  ]);
 
   const focusTerminal = () => {
     requestAnimationFrame(() => {
@@ -973,6 +1142,46 @@ const Terminal: React.FC<TerminalProps> = ({
       terminalInstance.current?.writeln(`\r\n[orchestrator] ${message}`);
     }
   }, [showQuickActionNotice]);
+  const sendHiddenLine = useCallback(async (line: string) => {
+    const normalized = String(line || '').replace(/[\r\n]+/g, ' ').trim();
+    if (!normalized) return false;
+
+    const relaunchEnv = ptyEnvRef.current || buildPtyEnv(controlTaskUrlRef.current || fallbackTaskControlUrl);
+    ptyEnvRef.current = relaunchEnv;
+    const maxAttempts = 8;
+
+    for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const result = await window.electronAPI.launchPty(taskId, normalized, { suppressEcho: true });
+        if (result?.success) {
+          focusTerminal();
+          return true;
+        }
+        const message = String(result?.error || 'PTY command dispatch failed.');
+        if (attempt < maxAttempts && /not running|session not found/i.test(message)) {
+          window.electronAPI.createPty(taskId, cwd, relaunchEnv);
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((resolve) => window.setTimeout(resolve, Math.min(900, 120 * (attempt + 1))));
+          continue;
+        }
+        writeOrchestratorHint(`Quick action failed: ${message}`);
+        return false;
+      } catch (error: any) {
+        const message = String(error?.message || 'PTY command dispatch failed.');
+        if (attempt < maxAttempts && /not running|session not found/i.test(message)) {
+          window.electronAPI.createPty(taskId, cwd, relaunchEnv);
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((resolve) => window.setTimeout(resolve, Math.min(900, 120 * (attempt + 1))));
+          continue;
+        }
+        writeOrchestratorHint(`Quick action failed: ${message}`);
+        return false;
+      }
+    }
+
+    writeOrchestratorHint('Quick action failed: PTY command dispatch timed out.');
+    return false;
+  }, [taskId, cwd, buildPtyEnv, fallbackTaskControlUrl, writeOrchestratorHint]);
 
   const recordQuickAction = (action: string, payload: Record<string, unknown> = {}) => {
     void window.electronAPI.fleetRecordEvent(taskId, 'quick_action', { action, ...payload });
@@ -1023,7 +1232,7 @@ const Terminal: React.FC<TerminalProps> = ({
     }
   }, [cwd, taskId, buildPtyEnv, fallbackTaskControlUrl]);
 
-  const runQuickActionPlan = useCallback((steps: QuickActionStep[]) => {
+  const runQuickActionPlan = useCallback(async (steps: QuickActionStep[]) => {
     for (const step of steps) {
       if (step.kind === 'hint') {
         writeOrchestratorHint(step.message);
@@ -1036,25 +1245,33 @@ const Terminal: React.FC<TerminalProps> = ({
       if (step.kind === 'send_line') {
         const normalized = step.line.replace(/\$MULTI_AGENT_IDE_URL/g, controlTaskUrlRef.current).trim();
         if (!normalized) continue;
-        sendLine(normalized, step.clearLine ?? false);
+        if (step.clearLine) {
+          sendRaw('\u0015');
+        }
+        const sent = await sendHiddenLine(normalized);
+        if (!sent) break;
         continue;
       }
       if (step.kind === 'launch_agent') {
-        sendLine(agentCommand, true);
+        sendRaw('\u0015');
+        const launched = await sendHiddenLine(agentCommand);
+        if (!launched) break;
         lastAgentLaunchAtRef.current = Date.now();
         if (step.postInstruction?.trim()) {
-          window.setTimeout(() => {
-            sendLine(step.postInstruction!.trim(), true);
-          }, 900);
+          // Allow shell prompt/agent boot to settle before sending follow-up instruction.
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((resolve) => window.setTimeout(resolve, 800));
+          // eslint-disable-next-line no-await-in-loop
+          await sendHiddenLine(step.postInstruction!.trim());
         }
       }
     }
-  }, [agentCommand, sendLine, sendRaw, writeOrchestratorHint]);
+  }, [agentCommand, sendRaw, sendHiddenLine, writeOrchestratorHint]);
 
   const queueShellPlan = useCallback((steps: QuickActionStep[]) => {
     if (isDisposedRef.current) return;
     if (isShellLikeMode(terminalModeRef.current)) {
-      runQuickActionPlan(steps);
+      void runQuickActionPlan(steps);
       return;
     }
 
@@ -1074,7 +1291,7 @@ const Terminal: React.FC<TerminalProps> = ({
     if (!isShellLikeMode(terminalMode)) return;
     const pending = clearPendingShellPlan();
     if (!pending) return;
-    runQuickActionPlan(pending.steps);
+    void runQuickActionPlan(pending.steps);
   }, [terminalMode, clearPendingShellPlan, runQuickActionPlan]);
 
   const dispatchQuickAction = useCallback((action: QuickActionId) => {
@@ -1123,9 +1340,15 @@ const Terminal: React.FC<TerminalProps> = ({
       });
       ensurePtyRunning(() => {
         const launchPlan = buildAgentLaunchPlan(agentCommand, undefined);
-        sendLine(launchPlan.command, true);
-        lastAgentLaunchAtRef.current = Date.now();
-        setAgentModeLikely(true);
+        sendRaw('\u0015');
+        void sendHiddenLine(launchPlan.command).then((sent) => {
+          if (!sent) {
+            setAgentModeLikely(false);
+            return;
+          }
+          lastAgentLaunchAtRef.current = Date.now();
+          setAgentModeLikely(true);
+        });
       });
       return;
     }
@@ -1153,7 +1376,7 @@ const Terminal: React.FC<TerminalProps> = ({
           prTarget: prTargetBranch
         });
         ensurePtyRunning(() => {
-          sendLine(line, false);
+          void sendHiddenLine(line);
         });
         return;
       }
@@ -1173,7 +1396,7 @@ const Terminal: React.FC<TerminalProps> = ({
 
     const needsPty = plan.steps.some(step => step.kind !== 'hint');
     if (!needsPty) {
-      runQuickActionPlan(plan.steps);
+      void runQuickActionPlan(plan.steps);
       return;
     }
 
@@ -1182,7 +1405,7 @@ const Terminal: React.FC<TerminalProps> = ({
         queueShellPlan(plan.steps);
         return;
       }
-      runQuickActionPlan(plan.steps);
+      void runQuickActionPlan(plan.steps);
     });
   }, [
     agentCommand,
@@ -1193,6 +1416,7 @@ const Terminal: React.FC<TerminalProps> = ({
     liveBlockedState.isBlocked,
     parentBranch,
     runQuickActionPlan,
+    sendHiddenLine,
     setAgentModeLikely,
     clearPendingShellPlan,
     queueShellPlan
@@ -1253,15 +1477,63 @@ const Terminal: React.FC<TerminalProps> = ({
   return (
     <div className="w-full h-full flex flex-col relative bg-[var(--xterm-bg)] rounded-xl overflow-hidden" onPaste={handlePaste}>
       <div
-        className="flex-1 relative overflow-hidden bg-[var(--xterm-bg)]"
+        className="flex-1 relative overflow-hidden bg-[var(--xterm-bg)] p-2"
         onMouseDown={() => {
           terminalInstance.current?.focus();
         }}
       >
-        <div ref={terminalRef} className="w-full h-full absolute inset-0" />
+        {startupProgressMeta && (
+          <div className="terminal-startup-overlay" role="status" aria-live="polite">
+            <div className="terminal-startup-overlay-card">
+              <div className="terminal-startup-progress-head">
+                <span>{startupProgressMeta.label}</span>
+                <span>{startupProgressMeta.percent}%</span>
+              </div>
+              <div className="terminal-startup-progress-track">
+                <div
+                  className={`terminal-startup-progress-fill ${startupProgressMeta.label === 'Loading session' ? 'animate-pulse' : ''}`}
+                  style={{ width: `${startupProgressMeta.percent}%` }}
+                />
+              </div>
+              {startupProgressMeta.detail && (
+                <div className="terminal-startup-progress-detail">{startupProgressMeta.detail}</div>
+              )}
+            </div>
+          </div>
+        )}
+        <div className="w-full h-full rounded-lg overflow-hidden border border-[var(--panel-border)] bg-[var(--xterm-bg)] p-2">
+          <div ref={terminalRef} className="w-full h-full rounded-md overflow-hidden" />
+        </div>
       </div>
 
       <div className="terminal-action-bar flex flex-col shrink-0 relative z-30">
+        {sandboxBanner && (
+          <div
+            className={`terminal-guardrail-banner ${sandboxBanner.tone === 'warning' ? 'terminal-guardrail-banner--warning' : 'terminal-guardrail-banner--info'}`}
+            role="status"
+            aria-live="polite"
+          >
+            <AlertTriangle size={12} className="flex-shrink-0" />
+            <span>{sandboxBanner.message}</span>
+          </div>
+        )}
+        {startupProgressMeta && (
+          <div className="terminal-startup-progress" role="status" aria-live="polite">
+            <div className="terminal-startup-progress-head">
+              <span>{startupProgressMeta.label}</span>
+              <span>{startupProgressMeta.percent}%</span>
+            </div>
+            <div className="terminal-startup-progress-track">
+              <div
+                className={`terminal-startup-progress-fill ${startupProgressMeta.label === 'Loading session' ? 'animate-pulse' : ''}`}
+                style={{ width: `${startupProgressMeta.percent}%` }}
+              />
+            </div>
+            {startupProgressMeta.detail && (
+              <div className="terminal-startup-progress-detail">{startupProgressMeta.detail}</div>
+            )}
+          </div>
+        )}
         {quickActionNotice && (
           <div className="terminal-action-notice">
             {quickActionNotice}

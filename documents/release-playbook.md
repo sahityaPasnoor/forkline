@@ -25,10 +25,8 @@ This validates:
 - core daemon security smoke test (`security:smoke`)
 - TypeScript checks pass (`web` + `electron`)
 - Build artifacts are generated
-- npm tarball includes required runtime modules (`packages/core`, `packages/tui`, protocol)
+- npm tarball includes required runtime modules (`packages/core`, protocol)
 - electron-builder includes required runtime files in desktop packaging
-
-Note: `packages/tui` is shipped but considered experimental.
 
 ## 3. Build local desktop installers
 
@@ -94,10 +92,4 @@ Check install paths:
 ```bash
 npx forkline@latest
 npx --package forkline forkline-core
-```
-
-Optional (experimental):
-
-```bash
-npx --package forkline forkline-tui
 ```

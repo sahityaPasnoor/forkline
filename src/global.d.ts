@@ -18,6 +18,13 @@ declare global {
         createdAt: number;
         updatedAt: number;
       }>>;
+      listAgentSessions: (agentCommand: string, projectPath: string) => Promise<{
+        success: boolean;
+        provider: 'claude' | 'gemini' | 'amp' | 'codex' | 'other';
+        supportsInAppList: boolean;
+        sessions?: Array<{ id: string; label: string; resumeArg?: string }>;
+        error?: string;
+      }>;
       detectAgents: () => Promise<{name: string, command: string, version: string}[]>;
       prepareAgentWorkspace: (
         worktreePath: string,
@@ -25,8 +32,9 @@ declare global {
         context: string,
         apiDoc: string,
         livingSpecPreference?: { mode: 'single' | 'consolidated'; selectedPath?: string },
-        livingSpecOverridePath?: string
-      ) => Promise<{success: boolean, error?: string}>;
+        livingSpecOverridePath?: string,
+        launchCommand?: string
+      ) => Promise<{success: boolean, launchScriptPath?: string, error?: string}>;
       detectLivingSpecCandidates: (basePath: string) => Promise<{
         success: boolean;
         candidates?: Array<{ path: string; kind: string }>;
@@ -94,10 +102,12 @@ declare global {
       fleetSetArchived: (taskId: string, archived: boolean) => Promise<{success: boolean, error?: string}>;
       fleetListOverview: () => Promise<{success: boolean, overview?: any, error?: string}>;
       fleetListProjects: () => Promise<{success: boolean, projects?: any[], error?: string}>;
+      fleetRemoveProject: (projectPath: string) => Promise<{success: boolean, removedProject?: boolean, removedTasks?: number, error?: string}>;
       fleetListTasks: (options?: any) => Promise<{success: boolean, tasks?: any[], error?: string}>;
       fleetGetTaskTimeline: (taskId: string) => Promise<{success: boolean, timeline?: any, error?: string}>;
       createPty: (taskId: string, cwd?: string, customEnv?: Record<string, string>) => void;
       writePty: (taskId: string, data: string) => void;
+      launchPty: (taskId: string, command: string, options?: { suppressEcho?: boolean }) => Promise<{ success: boolean; error?: string }>;
       resizePty: (taskId: string, cols: number, rows: number) => void;
       restartPty: (taskId: string) => Promise<{ success: boolean; running?: boolean; restarted?: boolean; error?: string }>;
       detachPty: (taskId: string) => void;
@@ -129,7 +139,13 @@ declare global {
       onPtyData: (taskId: string, callback: (data: string) => void) => () => void;
       onPtyState: (
         taskId: string,
-        callback: (data: {taskId: string, created: boolean, running: boolean, restarted?: boolean}) => void
+        callback: (data: {
+          taskId: string;
+          created: boolean;
+          running: boolean;
+          restarted?: boolean;
+          sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
+        }) => void
       ) => () => void;
       onPtyExit: (taskId: string, callback: (data: {taskId: string, exitCode: number | null, signal?: number}) => void) => () => void;
       onPtyMode: (

@@ -30,7 +30,12 @@ type PtyServiceInstance = {
     cwd: string,
     customEnv?: Record<string, string>,
     subscriberId?: string
-  ) => { created: boolean; running: boolean; restarted?: boolean };
+  ) => {
+    created: boolean;
+    running: boolean;
+    restarted?: boolean;
+    sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
+  };
   attach: (taskId: string, subscriberId?: string) => {
     taskId: string;
     outputBuffer: string;
@@ -44,11 +49,19 @@ type PtyServiceInstance = {
     running: boolean;
     exitCode: number | null;
     signal?: number;
+    sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
   } | null;
   detach: (taskId: string, subscriberId?: string) => void;
   write: (taskId: string, data: string) => { success: boolean; error?: string };
+  launch: (taskId: string, command: string, options?: { suppressEcho?: boolean }) => { success: boolean; error?: string };
   resize: (taskId: string, cols: number, rows: number) => { success: boolean };
-  restart: (taskId: string, subscriberId?: string) => { success: boolean; running: boolean; restarted: boolean; error?: string };
+  restart: (taskId: string, subscriberId?: string) => {
+    success: boolean;
+    running: boolean;
+    restarted: boolean;
+    error?: string;
+    sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
+  };
   destroy: (taskId: string) => { success: boolean };
   listSessions: () => Array<{
     taskId: string;
@@ -190,7 +203,8 @@ export class PtyManager {
         taskId,
         created: !!state.created,
         running: state.running,
-        restarted: !!state.restarted
+        restarted: !!state.restarted,
+        sandbox: existing?.sandbox ?? state.sandbox ?? null
       });
     });
 
@@ -208,6 +222,22 @@ export class PtyManager {
         return;
       }
       this.hooks.onSessionInput?.({ taskId, data });
+    });
+
+    ipcMain.handle('pty:launch', (event, { taskId, command, options }) => {
+      if (!PtyManager.TASK_ID_PATTERN.test(String(taskId || ''))) {
+        return { success: false, error: 'Invalid task id.' };
+      }
+      if (typeof command !== 'string') {
+        return { success: false, error: 'Launch command is required.' };
+      }
+      this.trackSubscriber(taskId, event.sender.id);
+      const result = this.service.launch(taskId, command, options || {});
+      if (!result.success) {
+        return result;
+      }
+      this.hooks.onSessionInput?.({ taskId, data: `${command}\r` });
+      return { success: true };
     });
 
     ipcMain.on('pty:resize', (event, { taskId, cols, rows }) => {
@@ -281,7 +311,8 @@ export class PtyManager {
         taskId,
         created: false,
         running: !!existing?.running,
-        restarted: true
+        restarted: true,
+        sandbox: existing?.sandbox ?? restarted.sandbox ?? null
       });
 
       return { success: true, running: !!existing?.running, restarted: true };

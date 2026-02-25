@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getControlBaseUrl: () => ipcRenderer.invoke('app:getControlBaseUrl'),
   getControlAuthToken: () => ipcRenderer.invoke('app:getControlAuthToken'),
   listPendingAgentRequests: () => ipcRenderer.invoke('app:listPendingAgentRequests'),
+  listAgentSessions: (agentCommand: string, projectPath: string) =>
+    ipcRenderer.invoke('app:listAgentSessions', { agentCommand, projectPath }),
   validateSource: (sourcePath: string) => ipcRenderer.invoke('git:validateSource', { sourcePath }),
   detectAgents: () => ipcRenderer.invoke('app:detectAgents'),
   prepareAgentWorkspace: (
@@ -17,7 +19,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     context: string,
     apiDoc: string,
     livingSpecPreference?: { mode: 'single' | 'consolidated'; selectedPath?: string },
-    livingSpecOverridePath?: string
+    livingSpecOverridePath?: string,
+    launchCommand?: string
   ) =>
     ipcRenderer.invoke('app:prepareAgentWorkspace', {
       worktreePath,
@@ -25,7 +28,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       context,
       apiDoc,
       livingSpecPreference,
-      livingSpecOverridePath
+      livingSpecOverridePath,
+      launchCommand
     }),
   detectLivingSpecCandidates: (basePath: string) =>
     ipcRenderer.invoke('app:detectLivingSpecCandidates', { basePath }),
@@ -69,10 +73,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   fleetSetArchived: (taskId: string, archived: boolean) => ipcRenderer.invoke('fleet:setArchived', { taskId, archived }),
   fleetListOverview: () => ipcRenderer.invoke('fleet:listOverview'),
   fleetListProjects: () => ipcRenderer.invoke('fleet:listProjects'),
+  fleetRemoveProject: (projectPath: string) => ipcRenderer.invoke('fleet:removeProject', { projectPath }),
   fleetListTasks: (options?: any) => ipcRenderer.invoke('fleet:listTasks', { options }),
   fleetGetTaskTimeline: (taskId: string) => ipcRenderer.invoke('fleet:getTaskTimeline', { taskId }),
   createPty: (taskId: string, cwd?: string, customEnv?: Record<string, string>) => ipcRenderer.send('pty:create', { taskId, cwd, customEnv }),
   writePty: (taskId: string, data: string) => ipcRenderer.send('pty:write', { taskId, data }),
+  launchPty: (taskId: string, command: string, options?: { suppressEcho?: boolean }) =>
+    ipcRenderer.invoke('pty:launch', { taskId, command, options }),
   resizePty: (taskId: string, cols: number, rows: number) => ipcRenderer.send('pty:resize', { taskId, cols, rows }),
   restartPty: (taskId: string) => ipcRenderer.invoke('pty:restart', { taskId }),
   detachPty: (taskId: string) => ipcRenderer.send('pty:detach', { taskId }),
@@ -84,11 +91,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on(channel, listener);
     return () => ipcRenderer.removeListener(channel, listener);
   },
-  onPtyState: (taskId: string, callback: (data: {taskId: string, created: boolean, running: boolean, restarted?: boolean}) => void) => {
+  onPtyState: (
+    taskId: string,
+    callback: (data: {
+      taskId: string;
+      created: boolean;
+      running: boolean;
+      restarted?: boolean;
+      sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
+    }) => void
+  ) => {
     const channel = `pty:state:${taskId}`;
     const listener = (
       _: Electron.IpcRendererEvent,
-      data: {taskId: string, created: boolean, running: boolean, restarted?: boolean}
+      data: {
+        taskId: string;
+        created: boolean;
+        running: boolean;
+        restarted?: boolean;
+        sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
+      }
     ) => callback(data);
     ipcRenderer.on(channel, listener);
     return () => ipcRenderer.removeListener(channel, listener);

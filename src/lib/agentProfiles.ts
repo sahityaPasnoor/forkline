@@ -30,9 +30,6 @@ export const resolveAgentProfile = (command: string): AgentProfile => {
   if (normalized.includes('gemini')) return profileFor('gemini', 'Gemini');
   if (normalized.includes('codex')) return profileFor('codex', 'Codex');
   if (normalized.includes('amp')) return profileFor('amp', 'Amp');
-  if (normalized.includes('cursor')) return profileFor('cursor', 'Cursor');
-  if (normalized.includes('cline')) return profileFor('cline', 'Cline');
-  if (normalized.includes('sweep')) return profileFor('sweep', 'Sweep');
   return profileFor('shell', 'Shell');
 };
 

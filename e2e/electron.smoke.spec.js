@@ -17,9 +17,26 @@ test('Forkline electron UI smoke flow', async () => {
     await window.waitForLoadState('domcontentloaded', { timeout: 60000 });
     await expect(window.locator('body')).toBeVisible();
 
-    const skipButton = window.getByRole('button', { name: /skip/i });
-    if (await skipButton.isVisible().catch(() => false)) {
-      await skipButton.click();
+    const onboardingThemeSelect = window.locator('select').first();
+    if (await onboardingThemeSelect.isVisible().catch(() => false)) {
+      const optionValues = await onboardingThemeSelect
+        .locator('option')
+        .evaluateAll((options) => options.map((option) => option.value).filter(Boolean));
+      if (optionValues.length > 1) {
+        await onboardingThemeSelect.selectOption(optionValues[1]);
+      }
+    }
+
+    const onboardingButtons = [
+      window.getByRole('button', { name: /enter forkline/i }).first(),
+      window.getByRole('button', { name: /enter app/i }).first(),
+      window.getByRole('button', { name: /finish setup/i }).first(),
+      window.getByRole('button', { name: /skip/i }).first()
+    ];
+    for (const button of onboardingButtons) {
+      if (await button.isVisible().catch(() => false)) {
+        await button.click();
+      }
     }
 
     const readyMarkers = [
