@@ -40,9 +40,9 @@ When a worktree is created, the IDE drops an `.agent_api.md` file into the direc
 - Agents can `POST /todos` to visually update a Kanban-style "Execution Plan" panel in the IDE.
 - Agents can `POST /merge` to ask the user to review their diff and merge their worktree back into the main branch.
 
-### 7. MCP & Context Injection
-- The IDE Settings allow defining a global System Context and Model Context Protocol (MCP) server JSON.
-- Upon spawning an agent, these are dynamically written into the isolated worktree as `.agent_memory.md` and `mcp.json`, seamlessly hooking the local agent into the user's internal toolchains without manual setup.
+### 7. Context Injection
+- The IDE Settings allow defining a global System Context.
+- Upon spawning an agent, this context is written into the isolated worktree as `.agent_memory.md` so each session starts with consistent project guidance.
 
 ### 8. Agent Handover Protocol
 If one agent (e.g., Claude) gets stuck on a complex logic error, the user can trigger a "Handover." The IDE forcefully interrupts the current agent (`SIGINT`), keeps the worktree intact, and boots up a different agent (e.g., Aider) in the exact same directory with a "Handover Prompt" to take over the task.

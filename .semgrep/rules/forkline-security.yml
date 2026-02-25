@@ -1,0 +1,48 @@
+rules:
+  - id: forkline-electron-nodeintegration-enabled
+    message: Do not enable nodeIntegration in renderer windows.
+    severity: ERROR
+    languages:
+      - javascript
+      - typescript
+    pattern-regex: \bnodeIntegration\s*:\s*true\b
+    metadata:
+      category: security
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation"
+
+  - id: forkline-electron-contextisolation-disabled
+    message: contextIsolation must remain enabled for renderer windows.
+    severity: ERROR
+    languages:
+      - javascript
+      - typescript
+    pattern-regex: \bcontextIsolation\s*:\s*false\b
+    metadata:
+      category: security
+      cwe:
+        - "CWE-693: Protection Mechanism Failure"
+
+  - id: forkline-permissive-cors-origin
+    message: Avoid wildcard Access-Control-Allow-Origin headers on local control surfaces.
+    severity: ERROR
+    languages:
+      - javascript
+      - typescript
+    pattern-regex: Access-Control-Allow-Origin['"]?\s*[:=]\s*['"]\*['"]
+    metadata:
+      category: security
+      cwe:
+        - "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+
+  - id: forkline-query-token-url
+    message: Do not transmit auth tokens in URL query strings.
+    severity: ERROR
+    languages:
+      - javascript
+      - typescript
+    pattern-regex: (\?|&)token=
+    metadata:
+      category: security
+      cwe:
+        - "CWE-598: Use of GET Request Method With Sensitive Query Strings"

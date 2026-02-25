@@ -49,7 +49,7 @@ const SplitTaskModal: React.FC<SplitTaskModalProps> = ({
             <GitFork className="text-[#a3a3a3]" size={16} />
             <h2 className="text-sm font-bold text-[#e5e5e5] uppercase tracking-widest">Split Into Subtasks</h2>
           </div>
-          <button onClick={onClose} className="text-[#525252] hover:text-white transition-colors">
+          <button onClick={onClose} className="btn-ghost btn-icon rounded-md">
             <X size={18} />
           </button>
         </div>
@@ -105,8 +105,8 @@ const SplitTaskModal: React.FC<SplitTaskModalProps> = ({
           </details>
 
           <div className="pt-2 flex justify-end space-x-3">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-xs font-bold btn-ghost rounded">Cancel</button>
-            <button type="submit" className="px-5 py-2 btn-primary rounded text-xs uppercase tracking-wider flex items-center">
+            <button type="button" onClick={onClose} className="btn-ghost px-4 py-2 text-xs font-bold rounded">Cancel</button>
+            <button type="submit" className="btn-primary px-5 py-2 rounded text-xs uppercase tracking-wider">
               <GitFork size={14} className="mr-2" /> Spawn Subtasks
             </button>
           </div>

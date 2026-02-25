@@ -6,10 +6,12 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-desktop:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -23,10 +25,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 20
           cache: npm
@@ -34,20 +36,71 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build and publish artifacts
-        run: npm run release
+      - name: Release preflight
+        run: npm run preflight:release
 
-  publish-npm:
+      - name: Build and publish artifacts
+        run: npx -y electron-builder@24.13.3 --publish always
+
+      - name: Upload desktop build artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: desktop-${{ matrix.os }}
+          path: release/*
+          if-no-files-found: warn
+
+  publish-sbom:
     needs: build-desktop
     runs-on: ubuntu-latest
-    if: ${{ secrets.NPM_TOKEN != '' }}
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate SBOM (CycloneDX + SPDX)
+        run: |
+          mkdir -p artifacts
+          npm sbom --omit dev --sbom-format cyclonedx > artifacts/sbom.cdx.json
+          npm sbom --omit dev --sbom-format spdx > artifacts/sbom.spdx.json
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sbom
+          path: artifacts/sbom.*
+
+      - name: Attach SBOM files to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" artifacts/sbom.cdx.json artifacts/sbom.spdx.json --clobber
+
+  publish-npm:
+    needs: [build-desktop, publish-sbom]
+    runs-on: ubuntu-latest
+    if: ${{ secrets.NPM_TOKEN != '' }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
@@ -56,7 +109,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Release preflight
+        run: npm run preflight:release
+
+      - name: Pack npm release tarball
+        run: |
+          mkdir -p artifacts
+          npm pack --pack-destination artifacts
+
+      - name: Upload npm package artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: npm-tarball
+          path: artifacts/*.tgz
+
+      - name: Attest npm package provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: artifacts/*.tgz
+
       - name: Publish package to npm
-        run: npm publish
+        run: npm publish --provenance artifacts/*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

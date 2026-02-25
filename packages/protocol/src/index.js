@@ -1,6 +1,7 @@
 const Events = {
   TASK_UPDATED: 'task.updated',
   PTY_DATA: 'pty.data',
+  PTY_MODE: 'pty.mode',
   APPROVAL_REQUIRED: 'approval.required',
   APPROVAL_RESOLVED: 'approval.resolved'
 };
@@ -12,8 +13,11 @@ const Routes = {
   GIT_VALIDATE: '/v1/git/validate',
   GIT_WORKTREE_CREATE: '/v1/git/worktree/create',
   GIT_WORKTREE_LIST: '/v1/git/worktree/list',
+  GIT_BRANCH_LIST: '/v1/git/branches/list',
   GIT_WORKTREE_REMOVE: '/v1/git/worktree/remove',
   GIT_WORKTREE_MERGE: '/v1/git/worktree/merge',
+  GIT_DIFF: '/v1/git/diff',
+  GIT_MODIFIED_FILES: '/v1/git/modified-files',
   PTY_CREATE: '/v1/pty/create',
   PTY_ATTACH: '/v1/pty/attach',
   PTY_DETACH: '/v1/pty/detach',
@@ -23,4 +27,27 @@ const Routes = {
   PTY_SESSIONS: '/v1/pty/sessions'
 };
 
-module.exports = { Events, Routes };
+const { detectAgentCapabilities, resolveQuickActionPlan } = require('./quick-actions');
+const {
+  PTY_MODES,
+  PTY_MODE_CONFIDENCE,
+  SUPPORTED_PROVIDERS,
+  detectProviderFromCommand,
+  buildAgentWrapperCommand,
+  parseForklineMarkers,
+  PtySessionStateMachine
+} = require('./pty-state-machine');
+
+module.exports = {
+  Events,
+  Routes,
+  detectAgentCapabilities,
+  resolveQuickActionPlan,
+  PTY_MODES,
+  PTY_MODE_CONFIDENCE,
+  SUPPORTED_PROVIDERS,
+  detectProviderFromCommand,
+  buildAgentWrapperCommand,
+  parseForklineMarkers,
+  PtySessionStateMachine
+};

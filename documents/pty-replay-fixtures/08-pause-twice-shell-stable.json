@@ -1,0 +1,27 @@
+{
+  "name": "pause_twice_stays_shell",
+  "providerHint": "claude",
+  "events": [
+    { "type": "start" },
+    {
+      "type": "output",
+      "data": "\u001b]1337;ForklineEvent=type=agent_started;provider=claude\u0007",
+      "expect": { "mode": "agent", "isBlocked": false }
+    },
+    {
+      "type": "input",
+      "data": "\u0003",
+      "expect": { "mode": "shell", "isBlocked": false }
+    },
+    {
+      "type": "input",
+      "data": "\u0003",
+      "expect": { "mode": "shell", "isBlocked": false }
+    }
+  ],
+  "expectFinal": {
+    "mode": "shell",
+    "isBlocked": false,
+    "provider": "claude"
+  }
+}

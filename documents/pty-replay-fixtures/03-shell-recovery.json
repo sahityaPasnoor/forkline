@@ -1,0 +1,25 @@
+{
+  "name": "pause_then_shell_prompt",
+  "providerHint": "claude",
+  "events": [
+    {
+      "type": "output",
+      "data": "\u001b]1337;ForklineEvent=type=agent_started;provider=claude\u0007",
+      "expect": { "mode": "agent", "isBlocked": false }
+    },
+    {
+      "type": "input",
+      "data": "\u0003",
+      "expect": { "mode": "shell", "isBlocked": false }
+    },
+    {
+      "type": "output",
+      "data": "~/repo task-1234 % ",
+      "expect": { "mode": "shell", "isBlocked": false }
+    }
+  ],
+  "expectFinal": {
+    "mode": "shell",
+    "isBlocked": false
+  }
+}
