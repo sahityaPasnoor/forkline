@@ -38,6 +38,7 @@
     "security:audit": "npm audit",
     "security:audit:prod": "npm audit --omit=dev",
     "security:smoke": "node scripts/security-smoke.js",
+    "test:core": "node --test \"packages/core/test/**/*.test.js\" \"packages/protocol/test/**/*.test.js\"",
     "audit:css": "node scripts/css-hardcode-audit.js",
     "test:pty-replay": "node scripts/pty-replay-harness.js",
     "preflight:release": "npm run security:audit && npm run security:smoke && npm run typecheck && npm run build && node scripts/release-preflight.js",
@@ -85,7 +86,7 @@
     "tailwindcss": "^3.4.19",
     "typescript": "^5.4.5",
     "vite": "^6.1.7",
-    "vitepress": "^1.5.0",
+    "vitepress": "2.0.0-alpha.16",
     "wait-on": "^7.2.0"
   },
   "build": {
