@@ -35,3 +35,4 @@ playwright-report/
 .claude/
 .agent_cache/
 documents/private/
+AGENTS.md
