@@ -1,0 +1,6 @@
+{
+  "name": "Forkline",
+  "tagline": "Run and control coding agents in isolated Git worktrees.",
+  "logoFile": "logo.svg",
+  "appIconFile": "logo.icns"
+}

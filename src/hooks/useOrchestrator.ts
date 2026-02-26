@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { buildSubtaskPrompt, sanitizeTaskName } from '../lib/taskUtils';
-import { shellQuote } from '../lib/shell';
+import { buildHandoverPacket } from '../lib/handover';
+import { buildHandoverDispatchPlan, defaultHandoverModeForCommand } from '../lib/handoverAdapters';
 import type {
   AttentionEvent,
   AgentCapabilities,
   AgentInfo,
   AgentTodo,
+  HandoverMode,
+  HandoverResult,
+  LivingSpecCandidate,
+  LivingSpecPreference,
+  LivingSpecSelectionPrompt,
   PendingApprovalRequest,
   ProjectPermissionPolicy,
   SourceStatus,
@@ -16,7 +22,7 @@ import type {
 
 type CloseAction = 'merge' | 'delete';
 const SESSION_STORAGE_KEY = 'orchestrator.runtime.session';
-const ATTENTION_FEED_ENABLED = false;
+const ATTENTION_FEED_ENABLED = true;
 const DEFAULT_PROJECT_POLICY: ProjectPermissionPolicy = {
   autonomousMode: false,
   autoApproveMerge: false,
@@ -32,6 +38,11 @@ interface CreateTaskInput {
   rawTaskName: string;
   agentCommand: string;
   prompt: string;
+  launchCommandOverride?: string;
+  baseBranch?: string;
+  createBaseBranchIfMissing?: boolean;
+  dependencyCloneMode?: 'copy_on_write' | 'full_copy';
+  livingSpecOverridePath?: string;
   capabilities: AgentCapabilities;
   parentTaskId?: string;
   activate?: boolean;
@@ -50,7 +61,63 @@ interface CreateTaskResult {
   error?: string;
 }
 
+interface LivingSpecGuardResult {
+  success: boolean;
+  error?: string;
+}
+
+interface LivingSpecSummary {
+  preferredLanguage?: string;
+  requiredExts?: string[];
+  forbiddenExts?: string[];
+}
+
 const normalizeProjectPath = (value: string) => value.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+const normalizeRelativeRepoPath = (value: string) => value.trim().replace(/\\/g, '/').replace(/^\.\/+/, '');
+const isAgentsInstructionPath = (value: string) => {
+  const normalized = value.trim().replace(/\\/g, '/').replace(/^\.\/+/, '').toLowerCase();
+  if (!normalized) return false;
+  return normalized.split('/').pop() === 'agents.md';
+};
+const rankLivingSpecCandidate = (candidate: LivingSpecCandidate) => {
+  const normalized = normalizeRelativePath(candidate.path).toLowerCase();
+  if (normalized === 'agents.md') return 0;
+  if (normalized === '.github/agents.md') return 1;
+  return 2;
+};
+const pickPreferredLivingSpecCandidate = (candidates: LivingSpecCandidate[]) => {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  const agentsCandidates = candidates
+    .filter((candidate) => isAgentsInstructionPath(candidate.path))
+    .sort((a, b) => {
+      const rankDiff = rankLivingSpecCandidate(a) - rankLivingSpecCandidate(b);
+      if (rankDiff !== 0) return rankDiff;
+      return normalizeRelativePath(a.path).localeCompare(normalizeRelativePath(b.path));
+    });
+  if (agentsCandidates.length > 0) return agentsCandidates[0];
+  return null;
+};
+const fileExtension = (filePath: string) => {
+  const idx = filePath.lastIndexOf('.');
+  if (idx <= 0) return '';
+  return filePath.slice(idx).toLowerCase();
+};
+
+const HIGH_IMPACT_FILE_PATTERNS = [
+  /^openapi(\.|$)/i,
+  /(^|\/)(openapi|swagger)\.(json|ya?ml)$/i,
+  /(^|\/)(schema|db|database)\.prisma$/i,
+  /(^|\/)package\.json$/i,
+  /(^|\/)pnpm-lock\.yaml$/i,
+  /(^|\/)package-lock\.json$/i,
+  /(^|\/)yarn\.lock$/i,
+  /(^|\/)go\.(mod|work|sum)$/i,
+  /(^|\/)Cargo\.(toml|lock)$/i,
+  /(^|\/)packages\/protocol\//i,
+  /(^|\/)(api|contracts|schema|proto)\//i
+];
+
+const hasHighImpactFile = (files: string[]) => files.some((file) => HIGH_IMPACT_FILE_PATTERNS.some((pattern) => pattern.test(file)));
 
 const toFiniteNumber = (value: unknown): number | undefined => {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -125,6 +192,52 @@ const extractTaskUsage = (payload: unknown): TaskUsage | null => {
   return null;
 };
 
+const usageFieldValue = (usage: TaskUsage | undefined, key: keyof TaskUsage) => {
+  const value = usage?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+};
+
+const taskUsageFieldChanged = (prev: TaskUsage | undefined, next: TaskUsage | undefined, key: keyof TaskUsage) => {
+  return usageFieldValue(prev, key) !== usageFieldValue(next, key);
+};
+
+const hasMeaningfulTaskUsageChange = (prev: TaskUsage | undefined, next: TaskUsage | undefined) => {
+  if (!prev && next) return true;
+  if (!next) return false;
+  for (const key of [
+    'contextTokens',
+    'promptTokens',
+    'completionTokens',
+    'totalTokens',
+    'contextWindow',
+    'percentUsed',
+    'costUsd',
+    'promptCostUsd',
+    'completionCostUsd'
+  ] as const) {
+    if (taskUsageFieldChanged(prev, next, key)) return true;
+  }
+  return false;
+};
+
+const hasLargeTaskUsageDelta = (prev: TaskUsage | undefined, next: TaskUsage | undefined) => {
+  if (!prev || !next) return true;
+  const totalDelta = Math.abs((next.totalTokens ?? prev.totalTokens ?? 0) - (prev.totalTokens ?? 0));
+  const promptDelta = Math.abs((next.promptTokens ?? prev.promptTokens ?? 0) - (prev.promptTokens ?? 0));
+  const completionDelta = Math.abs((next.completionTokens ?? prev.completionTokens ?? 0) - (prev.completionTokens ?? 0));
+  const contextDelta = Math.abs((next.contextTokens ?? prev.contextTokens ?? 0) - (prev.contextTokens ?? 0));
+  const percentDelta = Math.abs((next.percentUsed ?? prev.percentUsed ?? 0) - (prev.percentUsed ?? 0));
+  const costDelta = Math.abs((next.costUsd ?? prev.costUsd ?? 0) - (prev.costUsd ?? 0));
+  return (
+    totalDelta >= 64
+    || promptDelta >= 32
+    || completionDelta >= 32
+    || contextDelta >= 64
+    || percentDelta >= 1
+    || costDelta >= 0.001
+  );
+};
+
 const sanitizeTaskUsageMap = (value: unknown): Record<string, TaskUsage> => {
   if (!value || typeof value !== 'object') return {};
   const map: Record<string, TaskUsage> = {};
@@ -152,8 +265,25 @@ const sanitizeTaskStatusMap = (value: unknown): Record<string, TaskStatus> => {
       isReady: !!status.isReady,
       isDirty: !!status.isDirty,
       hasCollision: !!status.hasCollision,
-      isBlocked: !!status.isBlocked,
-      blockedReason: typeof status.blockedReason === 'string' ? status.blockedReason : undefined
+      // Blocked state is runtime/ephemeral and must come from live PTY events.
+      // Restoring it from persisted session data causes stale "Action Required" banners.
+      isBlocked: false,
+      blockedReason: undefined
+    };
+  }
+  return map;
+};
+
+const toPersistedTaskStatusMap = (value: Record<string, TaskStatus>): Record<string, TaskStatus> => {
+  const map: Record<string, TaskStatus> = {};
+  for (const [taskId, status] of Object.entries(value || {})) {
+    map[taskId] = {
+      isReady: !!status?.isReady,
+      isDirty: !!status?.isDirty,
+      hasCollision: !!status?.hasCollision,
+      // Persist only durable status fields. Blocked state must hydrate from live PTY events.
+      isBlocked: false,
+      blockedReason: undefined
     };
   }
   return map;
@@ -216,10 +346,64 @@ const sanitizeProjectPermissions = (value: unknown): Record<string, ProjectPermi
   return map;
 };
 
+const normalizeRelativePath = (value: string) => value.trim().replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/\/+/g, '/');
+
+const sanitizeLivingSpecPreferences = (value: unknown): Record<string, LivingSpecPreference> => {
+  if (!value || typeof value !== 'object') return {};
+  const map: Record<string, LivingSpecPreference> = {};
+  for (const [rawProjectPath, rawPreference] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedPath = normalizeProjectPath(rawProjectPath);
+    if (!normalizedPath || !rawPreference || typeof rawPreference !== 'object') continue;
+    const preference = rawPreference as Record<string, unknown>;
+    const mode = preference.mode === 'consolidated' ? 'consolidated' : (preference.mode === 'single' ? 'single' : null);
+    if (!mode) continue;
+    if (mode === 'single') {
+      const selectedPathRaw = typeof preference.selectedPath === 'string' ? normalizeRelativePath(preference.selectedPath) : '';
+      if (!selectedPathRaw || selectedPathRaw.startsWith('/') || selectedPathRaw.includes('..')) continue;
+      map[normalizedPath] = { mode: 'single', selectedPath: selectedPathRaw };
+      continue;
+    }
+    map[normalizedPath] = { mode: 'consolidated' };
+  }
+  return map;
+};
+
 const inferWorktreeName = (worktreePath: string) => {
   const normalized = worktreePath.replace(/\\/g, '/').replace(/\/+$/, '');
   const last = normalized.split('/').pop();
   return last && last.trim() ? last.trim() : 'restored-worktree';
+};
+
+const MAX_SESSION_DISPLAY_NAME_LENGTH = 72;
+const MAX_SESSION_TAG_LENGTH = 24;
+const MAX_SESSION_TAG_COUNT = 8;
+
+const sanitizeSessionDisplayName = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/\s+/g, ' ').slice(0, MAX_SESSION_DISPLAY_NAME_LENGTH);
+};
+
+const sanitizeSessionTag = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  const compact = value.trim().toLowerCase().replace(/\s+/g, '-');
+  const cleaned = compact.replace(/[^a-z0-9_-]/g, '').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  return cleaned.slice(0, MAX_SESSION_TAG_LENGTH);
+};
+
+const sanitizeSessionTags = (value: unknown) => {
+  const rawValues = Array.isArray(value)
+    ? value
+    : (typeof value === 'string' ? value.split(',') : []);
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const rawValue of rawValues) {
+    const tag = sanitizeSessionTag(rawValue);
+    if (!tag || seen.has(tag)) continue;
+    seen.add(tag);
+    normalized.push(tag);
+    if (normalized.length >= MAX_SESSION_TAG_COUNT) break;
+  }
+  return normalized;
 };
 
 const sanitizeTaskTabs = (value: unknown, basePathFallback: string, defaultCommandFallback: string): TaskTab[] => {
@@ -236,6 +420,8 @@ const sanitizeTaskTabs = (value: unknown, basePathFallback: string, defaultComma
     const name = typeof tab.name === 'string' && tab.name.trim()
       ? tab.name.trim()
       : 'restored-task';
+    const displayName = sanitizeSessionDisplayName(tab.displayName);
+    const tags = sanitizeSessionTags(tab.tags);
     const agent = typeof tab.agent === 'string' && tab.agent.trim()
       ? tab.agent.trim()
       : defaultCommandFallback;
@@ -246,11 +432,20 @@ const sanitizeTaskTabs = (value: unknown, basePathFallback: string, defaultComma
     const sanitizedTab: TaskTab = {
       id,
       name,
+      displayName: displayName && displayName !== name ? displayName : undefined,
+      tags: tags.length > 0 ? tags : undefined,
       agent,
       basePath,
       worktreePath: typeof tab.worktreePath === 'string' && tab.worktreePath.trim() ? tab.worktreePath : undefined,
+      parentBranch: typeof tab.parentBranch === 'string' && tab.parentBranch.trim() ? tab.parentBranch.trim() : undefined,
       parentTaskId: typeof tab.parentTaskId === 'string' && tab.parentTaskId.trim() ? tab.parentTaskId : undefined,
       prompt: typeof tab.prompt === 'string' ? tab.prompt : undefined,
+      launchCommandOverride: typeof tab.launchCommandOverride === 'string' && tab.launchCommandOverride.trim()
+        ? tab.launchCommandOverride.trim()
+        : undefined,
+      livingSpecOverridePath: typeof tab.livingSpecOverridePath === 'string' && tab.livingSpecOverridePath.trim()
+        ? normalizeRelativeRepoPath(tab.livingSpecOverridePath)
+        : undefined,
       capabilities: tab.capabilities && typeof tab.capabilities === 'object'
         ? { autoMerge: !!(tab.capabilities as Record<string, unknown>).autoMerge }
         : undefined,
@@ -263,6 +458,8 @@ const sanitizeTaskTabs = (value: unknown, basePathFallback: string, defaultComma
 
   return tabs;
 };
+
+const buildRestoredTaskId = () => `restored-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 export const useOrchestrator = () => {
   const [activeTab, setActiveTab] = useState<string | null>(null);
@@ -278,7 +475,13 @@ export const useOrchestrator = () => {
   const [context, setContext] = useState('');
   const [envVars, setEnvVars] = useState('');
   const [defaultCommand, setDefaultCommand] = useState('claude');
-  const [mcpServers, setMcpServers] = useState('');
+  const [packageStoreStrategy, setPackageStoreStrategy] = useState<'off' | 'pnpm_global' | 'polyglot_global'>('off');
+  const [dependencyCloneMode, setDependencyCloneMode] = useState<'copy_on_write' | 'full_copy'>('copy_on_write');
+  const [pnpmStorePath, setPnpmStorePath] = useState('');
+  const [sharedCacheRoot, setSharedCacheRoot] = useState('');
+  const [pnpmAutoInstall, setPnpmAutoInstall] = useState(false);
+  const [sandboxMode, setSandboxMode] = useState<'off' | 'auto' | 'seatbelt' | 'firejail'>('off');
+  const [networkGuard, setNetworkGuard] = useState<'off' | 'none'>('off');
   const [availableAgents, setAvailableAgents] = useState<AgentInfo[]>([]);
 
   const [taskStatuses, setTaskStatuses] = useState<Record<string, TaskStatus>>({});
@@ -288,11 +491,35 @@ export const useOrchestrator = () => {
   const [pendingApprovals, setPendingApprovals] = useState<PendingApprovalQueueItem[]>([]);
   const [attentionEvents, setAttentionEvents] = useState<AttentionEvent[]>([]);
   const [projectPermissions, setProjectPermissions] = useState<Record<string, ProjectPermissionPolicy>>({});
+  const [livingSpecPreferences, setLivingSpecPreferences] = useState<Record<string, LivingSpecPreference>>({});
+  const [livingSpecCandidatesByProject, setLivingSpecCandidatesByProject] = useState<Record<string, LivingSpecCandidate[]>>({});
+  const [livingSpecSummariesByProject, setLivingSpecSummariesByProject] = useState<Record<string, LivingSpecSummary>>({});
+  const [livingSpecSelectionPrompt, setLivingSpecSelectionPrompt] = useState<LivingSpecSelectionPrompt | null>(null);
   const projectPermissionsRef = useRef<Record<string, ProjectPermissionPolicy>>({});
+  const livingSpecPreferencesRef = useRef<Record<string, LivingSpecPreference>>({});
+  const livingSpecSummariesRef = useRef<Record<string, LivingSpecSummary>>({});
   const autoPromptLastResponseRef = useRef<Record<string, number>>({});
   const attentionDedupRef = useRef<Record<string, number>>({});
   const fleetSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingApproval = pendingApprovals[0] || null;
+  const refreshLivingSpecSummaryForProject = useCallback(async (projectPath: string) => {
+    const normalizedPath = normalizeProjectPath(projectPath);
+    if (!normalizedPath) return;
+    const preference = livingSpecPreferencesRef.current[normalizedPath];
+    const response = await window.electronAPI.getLivingSpecSummary(normalizedPath, preference);
+    if (!response.success || !response.summary) {
+      setLivingSpecSummariesByProject((prev) => {
+        const next = { ...prev };
+        delete next[normalizedPath];
+        return next;
+      });
+      return;
+    }
+    setLivingSpecSummariesByProject((prev) => ({
+      ...prev,
+      [normalizedPath]: response.summary as LivingSpecSummary
+    }));
+  }, []);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -305,6 +532,20 @@ export const useOrchestrator = () => {
   useEffect(() => {
     projectPermissionsRef.current = projectPermissions;
   }, [projectPermissions]);
+
+  useEffect(() => {
+    livingSpecPreferencesRef.current = livingSpecPreferences;
+  }, [livingSpecPreferences]);
+
+  useEffect(() => {
+    livingSpecSummariesRef.current = livingSpecSummariesByProject;
+  }, [livingSpecSummariesByProject]);
+
+  useEffect(() => {
+    const normalizedPath = normalizeProjectPath(basePath);
+    if (!normalizedPath) return;
+    void refreshLivingSpecSummaryForProject(normalizedPath);
+  }, [basePath, livingSpecPreferences, refreshLivingSpecSummaryForProject]);
 
   const validatePath = useCallback(async (path: string) => {
     if (!path) {
@@ -339,6 +580,104 @@ export const useOrchestrator = () => {
       };
       return { ...prev, [normalizedPath]: nextPolicy };
     });
+  }, []);
+
+  const isLivingSpecPreferenceValid = useCallback((preference: LivingSpecPreference | undefined, candidates: LivingSpecCandidate[]) => {
+    if (!preference) return false;
+    if (candidates.length === 0) return true;
+    const agentsCandidates = candidates.filter((candidate) => isAgentsInstructionPath(candidate.path));
+    if (agentsCandidates.length > 0) {
+      if (preference.mode !== 'single' || !preference.selectedPath) return false;
+      const normalizedSelection = normalizeRelativePath(preference.selectedPath);
+      return agentsCandidates.some((candidate) => normalizeRelativePath(candidate.path) === normalizedSelection);
+    }
+    if (preference.mode === 'consolidated') return true;
+    if (!preference.selectedPath) return false;
+    const normalizedSelection = normalizeRelativePath(preference.selectedPath);
+    return candidates.some((candidate) => normalizeRelativePath(candidate.path) === normalizedSelection);
+  }, []);
+
+  const setProjectLivingSpecPreference = useCallback((projectPath: string, preference: LivingSpecPreference) => {
+    const normalizedPath = normalizeProjectPath(projectPath);
+    if (!normalizedPath) return;
+    setLivingSpecPreferences((prev) => ({ ...prev, [normalizedPath]: preference }));
+    void refreshLivingSpecSummaryForProject(normalizedPath);
+  }, [refreshLivingSpecSummaryForProject]);
+
+  const detectLivingSpecCandidatesForProject = useCallback(async (projectPath: string): Promise<LivingSpecCandidate[]> => {
+    const normalizedPath = normalizeProjectPath(projectPath);
+    if (!normalizedPath) return [];
+    const response = await window.electronAPI.detectLivingSpecCandidates(normalizedPath);
+    if (!response.success || !Array.isArray(response.candidates)) {
+      setLivingSpecCandidatesByProject((prev) => ({ ...prev, [normalizedPath]: [] }));
+      return [];
+    }
+    const candidates = response.candidates
+      .filter((candidate) => candidate && typeof candidate.path === 'string' && candidate.path.trim())
+      .map((candidate) => ({
+        path: normalizeRelativePath(candidate.path),
+        kind: typeof candidate.kind === 'string' && candidate.kind.trim() ? candidate.kind.trim() : 'spec'
+      }))
+      .filter((candidate) => candidate.path && !candidate.path.startsWith('/') && !candidate.path.includes('..'));
+    setLivingSpecCandidatesByProject((prev) => ({ ...prev, [normalizedPath]: candidates }));
+    return candidates;
+  }, []);
+
+  const ensureLivingSpecSelection = useCallback(async (projectPath: string): Promise<LivingSpecGuardResult> => {
+    const normalizedPath = normalizeProjectPath(projectPath);
+    if (!normalizedPath) return { success: true };
+    const existingCandidates = livingSpecCandidatesByProject[normalizedPath];
+    const candidates = Array.isArray(existingCandidates)
+      ? existingCandidates
+      : await detectLivingSpecCandidatesForProject(normalizedPath);
+    if (candidates.length === 0) return { success: true };
+
+    const currentPreference = livingSpecPreferencesRef.current[normalizedPath];
+    if (isLivingSpecPreferenceValid(currentPreference, candidates)) {
+      return { success: true };
+    }
+
+    const preferredCandidate = pickPreferredLivingSpecCandidate(candidates);
+    if (preferredCandidate) {
+      setProjectLivingSpecPreference(normalizedPath, {
+        mode: 'single',
+        selectedPath: preferredCandidate.path
+      });
+      return { success: true };
+    }
+
+    if (candidates.length === 1) {
+      setProjectLivingSpecPreference(normalizedPath, {
+        mode: 'single',
+        selectedPath: candidates[0].path
+      });
+      return { success: true };
+    }
+
+    setLivingSpecSelectionPrompt({ projectPath: normalizedPath, candidates });
+    return {
+      success: false,
+      error: 'Choose an AGENTS.md instruction file before spawning a new task.'
+    };
+  }, [detectLivingSpecCandidatesForProject, isLivingSpecPreferenceValid, livingSpecCandidatesByProject, setProjectLivingSpecPreference]);
+
+  const resolveLivingSpecSelectionPrompt = useCallback((preference: LivingSpecPreference) => {
+    const currentPrompt = livingSpecSelectionPrompt;
+    if (!currentPrompt) return;
+    if (preference.mode === 'single') {
+      const normalizedSelection = normalizeRelativePath(preference.selectedPath || '');
+      const isKnown = currentPrompt.candidates.some((candidate) => normalizeRelativePath(candidate.path) === normalizedSelection);
+      if (!isKnown) return;
+      setProjectLivingSpecPreference(currentPrompt.projectPath, { mode: 'single', selectedPath: normalizedSelection });
+      setLivingSpecSelectionPrompt(null);
+      return;
+    }
+    setProjectLivingSpecPreference(currentPrompt.projectPath, { mode: 'consolidated' });
+    setLivingSpecSelectionPrompt(null);
+  }, [livingSpecSelectionPrompt, setProjectLivingSpecPreference]);
+
+  const dismissLivingSpecSelectionPrompt = useCallback(() => {
+    setLivingSpecSelectionPrompt(null);
   }, []);
 
   const switchProject = useCallback((path: string) => {
@@ -392,7 +731,8 @@ export const useOrchestrator = () => {
     const now = Date.now();
     const dedupeKey = `${event.kind}::${event.projectPath}::${event.taskId}::${event.reason}`;
     const lastAt = attentionDedupRef.current[dedupeKey] || 0;
-    if (now - lastAt < 1000) return;
+    const dedupeWindowMs = event.kind === 'context_alert' || event.kind === 'spec_deviation' ? 120_000 : 1_500;
+    if (now - lastAt < dedupeWindowMs) return;
     attentionDedupRef.current[dedupeKey] = now;
 
     setAttentionEvents(prev => {
@@ -416,6 +756,32 @@ export const useOrchestrator = () => {
   const clearAttentionEvents = useCallback(() => {
     if (!ATTENTION_FEED_ENABLED) return;
     setAttentionEvents([]);
+  }, []);
+
+  const forgetProjectState = useCallback((projectPath: string) => {
+    const normalizedProjectPath = normalizeProjectPath(projectPath);
+    if (!normalizedProjectPath) return;
+
+    const removeScopedKey = <T extends Record<string, unknown>>(state: T): T => {
+      if (!Object.prototype.hasOwnProperty.call(state, normalizedProjectPath)) return state;
+      const next = { ...state };
+      delete next[normalizedProjectPath];
+      return next;
+    };
+
+    setActiveTabByProject(prev => removeScopedKey(prev));
+    setProjectPermissions(prev => removeScopedKey(prev));
+    setLivingSpecPreferences(prev => removeScopedKey(prev));
+    setLivingSpecCandidatesByProject(prev => removeScopedKey(prev));
+    setLivingSpecSummariesByProject(prev => removeScopedKey(prev));
+    setPendingApprovals(prev => prev.filter((item) => {
+      if (normalizeProjectPath(item.projectPath) === normalizedProjectPath) return false;
+      const matchingTab = tabsRef.current.find((tab) => tab.id === item.taskId);
+      if (!matchingTab) return true;
+      return normalizeProjectPath(matchingTab.basePath) !== normalizedProjectPath;
+    }));
+    setAttentionEvents(prev => prev.filter((event) => normalizeProjectPath(event.projectPath) !== normalizedProjectPath));
+    setLivingSpecSelectionPrompt(prev => (prev?.projectPath === normalizedProjectPath ? null : prev));
   }, []);
 
   const clearAttentionForTask = useCallback((taskId: string, kinds?: AttentionEvent['kind'][]) => {
@@ -498,6 +864,11 @@ export const useOrchestrator = () => {
     rawTaskName,
     agentCommand,
     prompt,
+    launchCommandOverride,
+    baseBranch,
+    createBaseBranchIfMissing,
+    dependencyCloneMode: taskDependencyCloneMode,
+    livingSpecOverridePath,
     capabilities,
     parentTaskId,
     activate = true
@@ -505,16 +876,26 @@ export const useOrchestrator = () => {
     if (!basePath) {
       return { success: false, error: 'Base path is empty' };
     }
+    const livingSpecGuard = await ensureLivingSpecSelection(basePath);
+    if (!livingSpecGuard.success) {
+      return { success: false, error: livingSpecGuard.error || 'Living Spec selection is required.' };
+    }
 
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const taskName = sanitizeTaskName(rawTaskName, id);
+    const selectedParentBranch = typeof baseBranch === 'string' && baseBranch.trim() ? baseBranch.trim() : undefined;
     const newTask: TaskTab = {
       id,
       name: taskName,
       agent: agentCommand,
       basePath,
+      parentBranch: selectedParentBranch,
       parentTaskId,
       prompt,
+      launchCommandOverride: typeof launchCommandOverride === 'string' && launchCommandOverride.trim()
+        ? launchCommandOverride.trim()
+        : undefined,
+      livingSpecOverridePath: livingSpecOverridePath ? normalizeRelativeRepoPath(livingSpecOverridePath) : undefined,
       capabilities,
       hasBootstrapped: false
     };
@@ -529,7 +910,14 @@ export const useOrchestrator = () => {
     if (activate) setActiveTab(id);
 
     try {
-      const result = await window.electronAPI.createWorktree(basePath, taskName);
+      const result = await window.electronAPI.createWorktree(basePath, taskName, baseBranch, {
+        createBaseBranchIfMissing,
+        dependencyCloneMode: taskDependencyCloneMode || dependencyCloneMode,
+        packageStoreStrategy,
+        pnpmStorePath,
+        sharedCacheRoot,
+        pnpmAutoInstall
+      });
       if (result.success && result.worktreePath) {
         tabsRef.current = tabsRef.current.map(t => (t.id === id ? { ...t, worktreePath: result.worktreePath } : t));
         setTabs(tabsRef.current);
@@ -537,6 +925,7 @@ export const useOrchestrator = () => {
           basePath,
           worktreePath: result.worktreePath,
           agent: agentCommand,
+          parentBranch: selectedParentBranch || null,
           parentTaskId: parentTaskId || null
         });
         return { success: true, taskId: id };
@@ -548,32 +937,247 @@ export const useOrchestrator = () => {
       removeTaskFromState(id);
       return { success: false, error: e.message };
     }
-  }, [basePath, removeTaskFromState]);
+  }, [basePath, dependencyCloneMode, ensureLivingSpecSelection, packageStoreStrategy, pnpmAutoInstall, pnpmStorePath, removeTaskFromState, sharedCacheRoot]);
 
   const markTaskBootstrapped = useCallback((taskId: string) => {
     let changed = false;
     tabsRef.current = tabsRef.current.map(tab => {
       if (tab.id !== taskId) return tab;
-      if (tab.hasBootstrapped) return tab;
+      if (tab.hasBootstrapped && !tab.launchCommandOverride) return tab;
       changed = true;
-      return { ...tab, hasBootstrapped: true };
+      return { ...tab, hasBootstrapped: true, launchCommandOverride: undefined };
     });
     if (changed) {
       setTabs(tabsRef.current);
     }
   }, []);
 
-  const handoverTask = useCallback((taskId: string, command: string, prompt: string) => {
-    window.electronAPI.writePty(taskId, '\x03');
-    setTimeout(() => {
-      const quotedPrompt = shellQuote(prompt);
-      window.electronAPI.writePty(taskId, `clear && echo "Handover initiated..." && ${command} ${quotedPrompt}\r`);
-    }, 500);
+  const renameTaskSession = useCallback((taskId: string, requestedName: string) => {
+    const requested = sanitizeSessionDisplayName(requestedName);
+    let changed = false;
+    let persistedDisplayName: string | undefined;
 
-    tabsRef.current = tabsRef.current.map(t => (t.id === taskId ? { ...t, agent: command } : t));
+    tabsRef.current = tabsRef.current.map((tab) => {
+      if (tab.id !== taskId) return tab;
+      const fallbackName = sanitizeSessionDisplayName(tab.name);
+      const previousDisplayName = sanitizeSessionDisplayName(tab.displayName);
+      const normalizedPrevious = previousDisplayName && previousDisplayName !== fallbackName ? previousDisplayName : '';
+      const normalizedNext = requested && requested !== fallbackName ? requested : '';
+      if (normalizedNext === normalizedPrevious) return tab;
+      changed = true;
+      persistedDisplayName = normalizedNext || undefined;
+      return {
+        ...tab,
+        displayName: normalizedNext || undefined
+      };
+    });
+
+    if (!changed) return false;
     setTabs(tabsRef.current);
-    void window.electronAPI.fleetRecordEvent(taskId, 'handover', { command, promptLength: prompt.length });
+    void window.electronAPI.fleetRecordEvent(taskId, 'session_renamed', {
+      displayName: persistedDisplayName || null
+    });
+    return true;
   }, []);
+
+  const setTaskTags = useCallback((taskId: string, requestedTags: string[] | string) => {
+    const normalizedNextTags = sanitizeSessionTags(requestedTags);
+    let changed = false;
+
+    tabsRef.current = tabsRef.current.map((tab) => {
+      if (tab.id !== taskId) return tab;
+      const normalizedPreviousTags = sanitizeSessionTags(tab.tags);
+      const isSameLength = normalizedPreviousTags.length === normalizedNextTags.length;
+      const isSameValue = isSameLength && normalizedPreviousTags.every((tag, index) => normalizedNextTags[index] === tag);
+      if (isSameValue) return tab;
+      changed = true;
+      return {
+        ...tab,
+        tags: normalizedNextTags.length > 0 ? normalizedNextTags : undefined
+      };
+    });
+
+    if (!changed) return false;
+    setTabs(tabsRef.current);
+    void window.electronAPI.fleetRecordEvent(taskId, 'session_tags_updated', {
+      tags: normalizedNextTags
+    });
+    return true;
+  }, []);
+
+  const handoverTask = useCallback(async (
+    taskId: string,
+    command: string,
+    prompt: string,
+    modeOverride?: HandoverMode
+  ): Promise<HandoverResult> => {
+    const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+    const runHiddenLine = async (line: string, fallbackCwd?: string) => {
+      const normalizedLine = String(line || '').replace(/[\r\n]+/g, ' ').trim();
+      if (!normalizedLine) return { success: false, error: 'Empty PTY command.' };
+      const maxAttempts = 8;
+      for (let attempt = 0; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const result = await window.electronAPI.launchPty(taskId, normalizedLine, { suppressEcho: true });
+          if (result?.success) return { success: true as const };
+          const message = String(result?.error || 'PTY launch failed.');
+          if (attempt < maxAttempts && /not running|session not found/i.test(message)) {
+            window.electronAPI.createPty(taskId, fallbackCwd || '');
+            // eslint-disable-next-line no-await-in-loop
+            await sleep(Math.min(900, 120 * (attempt + 1)));
+            continue;
+          }
+          return { success: false as const, error: message };
+        } catch (error: any) {
+          const message = String(error?.message || 'PTY launch failed.');
+          if (attempt < maxAttempts && /not running|session not found/i.test(message)) {
+            window.electronAPI.createPty(taskId, fallbackCwd || '');
+            // eslint-disable-next-line no-await-in-loop
+            await sleep(Math.min(900, 120 * (attempt + 1)));
+            continue;
+          }
+          return { success: false as const, error: message };
+        }
+      }
+      return { success: false as const, error: 'PTY launch timed out.' };
+    };
+    const waitForAgentMode = async (timeoutMs: number) => {
+      const deadline = Date.now() + Math.max(300, timeoutMs);
+      while (Date.now() < deadline) {
+        try {
+          const sessionsResult = await window.electronAPI.listPtySessions();
+          const currentSession = sessionsResult.success
+            ? sessionsResult.sessions?.find((item) => item.taskId === taskId)
+            : undefined;
+          const mode = String(currentSession?.mode || '').toLowerCase();
+          if (mode === 'agent' || mode === 'blocked' || mode === 'tui') {
+            return true;
+          }
+        } catch {
+          // Best effort polling only.
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(120);
+      }
+      return false;
+    };
+    try {
+      const tab = tabsRef.current.find((item) => item.id === taskId);
+      if (!tab) {
+        return { success: false, error: 'Task not found.' };
+      }
+      if (!tab.worktreePath) {
+        return { success: false, error: 'Task worktree is not ready for handover.' };
+      }
+      const targetCommand = command.trim();
+      if (!targetCommand) {
+        return { success: false, error: 'Target agent command is empty.' };
+      }
+      const operatorInstruction = prompt.trim();
+      if (!operatorInstruction) {
+        return { success: false, error: 'Handover instruction cannot be empty.' };
+      }
+
+      const ensurePtySession = async () => {
+        try {
+          const sessionsResult = await window.electronAPI.listPtySessions();
+          const session = sessionsResult.success
+            ? sessionsResult.sessions?.find((item) => item.taskId === taskId)
+            : undefined;
+          if (!session || !session.running) {
+            window.electronAPI.createPty(taskId, tab.worktreePath);
+            await sleep(450);
+          }
+        } catch {
+          window.electronAPI.createPty(taskId, tab.worktreePath);
+          await sleep(450);
+        }
+      };
+
+      await ensurePtySession();
+      const modifiedResult = await window.electronAPI.getModifiedFiles(tab.worktreePath);
+      const modifiedFiles = modifiedResult.success && Array.isArray(modifiedResult.files)
+        ? modifiedResult.files
+        : [];
+      const packet = buildHandoverPacket({
+        taskId,
+        taskName: tab.name,
+        worktreePath: tab.worktreePath,
+        sourceAgent: tab.agent,
+        targetAgent: targetCommand,
+        parentBranch: tab.parentBranch,
+        currentBranch: tab.name,
+        objective: tab.prompt,
+        operatorInstruction,
+        status: taskStatuses[taskId],
+        todos: taskTodos[taskId] || [],
+        usage: taskUsage[taskId],
+        modifiedFiles
+      });
+      const mode = modeOverride || defaultHandoverModeForCommand(targetCommand);
+
+      const artifactRes = await window.electronAPI.writeHandoverArtifact(tab.worktreePath, packet, targetCommand)
+        .catch(() => ({ success: false as const }));
+      const artifactPath = artifactRes.success ? artifactRes.latestPath : undefined;
+      if (artifactPath) {
+        packet.artifactPath = artifactPath;
+        packet.transferBrief = `${packet.transferBrief} | Artifact=${artifactPath}`;
+      }
+
+      const plan = buildHandoverDispatchPlan(targetCommand, packet.transferBrief, mode);
+      if (mode === 'clean') {
+        const restartResult = await window.electronAPI.restartPty(taskId)
+          .catch((error: any) => ({ success: false, error: error?.message || 'PTY restart failed.' }));
+        if (!restartResult.success) {
+          // Fallback: recover by recreating/interrupting the existing PTY.
+          await ensurePtySession();
+          window.electronAPI.writePty(taskId, '\x03');
+          await sleep(180);
+        }
+      } else if (plan.interruptBeforeLaunch) {
+        window.electronAPI.writePty(taskId, '\x03');
+        await sleep(150);
+      }
+
+      await sleep(Math.min(plan.launchDelayMs, 160));
+      const launchDispatch = await runHiddenLine(plan.launchCommand, tab.worktreePath);
+      if (!launchDispatch.success) {
+        return { success: false, error: launchDispatch.error || 'Failed to launch target agent.' };
+      }
+      if (!plan.inlineTransfer) {
+        await waitForAgentMode(Math.min(2400, plan.transferDelayMs + 500));
+        await sleep(120);
+        const sanitizedTransferLine = plan.transferLine.replace(/[\r\n]+/g, ' ').trim();
+        if (sanitizedTransferLine) {
+          const transferDispatch = await runHiddenLine(sanitizedTransferLine, tab.worktreePath);
+          if (!transferDispatch.success) {
+            return { success: false, error: transferDispatch.error || 'Failed to deliver handover packet.' };
+          }
+        }
+      }
+
+      tabsRef.current = tabsRef.current.map((item) => (
+        item.id === taskId
+          ? { ...item, agent: targetCommand, hasBootstrapped: true }
+          : item
+      ));
+      setTabs(tabsRef.current);
+      void window.electronAPI.fleetRecordEvent(taskId, 'handover', {
+        command: targetCommand,
+        mode,
+        promptLength: operatorInstruction.length,
+        modifiedCount: packet.git.modifiedCount,
+        todoCount: packet.task.todos.length,
+        blocked: packet.task.isBlocked,
+        artifactPath: artifactPath || null,
+        inlineTransfer: plan.inlineTransfer,
+        provider: plan.provider
+      });
+      return { success: true, packet, mode };
+    } catch (error: any) {
+      return { success: false, error: error?.message || 'Handover failed unexpectedly.' };
+    }
+  }, [taskStatuses, taskTodos, taskUsage]);
 
   const splitTask = useCallback(async ({ parentTaskId, objective, count, command }: SplitTaskInput) => {
     const parentTab = tabsRef.current.find(t => t.id === parentTaskId);
@@ -611,28 +1215,111 @@ export const useOrchestrator = () => {
     return createdTaskIds;
   }, [createTask, selectTab]);
 
-  const approvePendingRequest = useCallback(async () => {
-    if (!pendingApproval) return;
+  const restoreExistingWorktree = useCallback((projectPath: string, worktreePath: string, branchName?: string | null) => {
+    const normalizedProjectPath = normalizeProjectPath(projectPath);
+    const normalizedWorktreePath = normalizeProjectPath(worktreePath);
+    if (!normalizedProjectPath || !normalizedWorktreePath) return null;
 
-    window.electronAPI.respondToAgent(pendingApproval.requestId, 200, { status: 'approved' });
-    if (pendingApproval.action === 'merge') {
-      const res = await closeTaskById(pendingApproval.taskId, 'merge');
+    const existing = tabsRef.current.find(tab => normalizeProjectPath(tab.worktreePath || '') === normalizedWorktreePath);
+    if (existing) {
+      selectTab(existing.id);
+      return existing.id;
+    }
+
+    const restoredTab: TaskTab = {
+      id: buildRestoredTaskId(),
+      name: (branchName && branchName.trim()) ? branchName.trim() : inferWorktreeName(normalizedWorktreePath),
+      agent: defaultCommand,
+      basePath: normalizedProjectPath,
+      worktreePath: normalizedWorktreePath,
+      capabilities: { autoMerge: false },
+      hasBootstrapped: true
+    };
+
+    const nextTabs = [...tabsRef.current, restoredTab];
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+    setActiveTab(restoredTab.id);
+    setBasePath(normalizedProjectPath);
+    setActiveTabByProject(prev => ({ ...prev, [normalizedProjectPath]: restoredTab.id }));
+    void validatePath(normalizedProjectPath);
+    void window.electronAPI.fleetRecordEvent(restoredTab.id, 'worktree_session_restored', {
+      basePath: normalizedProjectPath,
+      worktreePath: normalizedWorktreePath
+    });
+    return restoredTab.id;
+  }, [defaultCommand, selectTab, validatePath]);
+
+  const approveApprovalRequest = useCallback(async (requestId: string) => {
+    const request = pendingApprovals.find((item) => item.requestId === requestId);
+    if (!request) return;
+
+    window.electronAPI.respondToAgent(request.requestId, 200, { status: 'approved' });
+    if (request.action === 'merge') {
+      const res = await closeTaskById(request.taskId, 'merge');
       if (!res.success) {
-        alert(`Failed to merge worktree: ${res.error}`);
+        const tab = tabsRef.current.find((item) => item.id === request.taskId);
+        pushAttentionEvent({
+          kind: 'approval_required',
+          projectPath: tab?.basePath || '',
+          taskId: request.taskId,
+          taskName: tab?.name || request.taskId,
+          reason: `Merge approval accepted, but local merge failed: ${res.error || 'unknown error'}.`,
+          requiresAction: true
+        });
       }
     }
-    void window.electronAPI.fleetRecordEvent(pendingApproval.taskId, 'approval_accepted', { action: pendingApproval.action });
-    clearAttentionForTask(pendingApproval.taskId, ['approval_required']);
-    setPendingApprovals(prev => prev.filter(item => item.requestId !== pendingApproval.requestId));
-  }, [pendingApproval, closeTaskById, clearAttentionForTask]);
+    void window.electronAPI.fleetRecordEvent(request.taskId, 'approval_accepted', { action: request.action });
+    clearAttentionForTask(request.taskId, ['approval_required']);
+    setPendingApprovals(prev => prev.filter(item => item.requestId !== request.requestId));
+  }, [pendingApprovals, closeTaskById, clearAttentionForTask, pushAttentionEvent]);
+
+  const rejectApprovalRequest = useCallback((requestId: string) => {
+    const request = pendingApprovals.find((item) => item.requestId === requestId);
+    if (!request) return;
+    window.electronAPI.respondToAgent(request.requestId, 403, { error: 'Request denied by user' });
+    void window.electronAPI.fleetRecordEvent(request.taskId, 'approval_rejected', { action: request.action });
+    clearAttentionForTask(request.taskId, ['approval_required']);
+    setPendingApprovals(prev => prev.filter(item => item.requestId !== request.requestId));
+  }, [pendingApprovals, clearAttentionForTask]);
+
+  const approvePendingRequest = useCallback(async () => {
+    if (!pendingApproval) return;
+    await approveApprovalRequest(pendingApproval.requestId);
+  }, [pendingApproval, approveApprovalRequest]);
 
   const rejectPendingRequest = useCallback(() => {
     if (!pendingApproval) return;
-    window.electronAPI.respondToAgent(pendingApproval.requestId, 403, { error: 'Request denied by user' });
-    void window.electronAPI.fleetRecordEvent(pendingApproval.taskId, 'approval_rejected', { action: pendingApproval.action });
-    clearAttentionForTask(pendingApproval.taskId, ['approval_required']);
-    setPendingApprovals(prev => prev.filter(item => item.requestId !== pendingApproval.requestId));
-  }, [pendingApproval, clearAttentionForTask]);
+    rejectApprovalRequest(pendingApproval.requestId);
+  }, [pendingApproval, rejectApprovalRequest]);
+
+  const approveAllPendingRequests = useCallback(async () => {
+    const ids = pendingApprovals.map((item) => item.requestId);
+    for (const requestId of ids) {
+      // eslint-disable-next-line no-await-in-loop
+      await approveApprovalRequest(requestId);
+    }
+  }, [pendingApprovals, approveApprovalRequest]);
+
+  const rejectAllPendingRequests = useCallback(() => {
+    const ids = pendingApprovals.map((item) => item.requestId);
+    ids.forEach((requestId) => rejectApprovalRequest(requestId));
+  }, [pendingApprovals, rejectApprovalRequest]);
+
+  const respondToBlockedTask = useCallback((taskId: string, response: 'y' | 'n') => {
+    window.electronAPI.writePty(taskId, `${response}\r`);
+    void window.electronAPI.fleetRecordEvent(taskId, 'blocked_prompt_response', { response });
+  }, []);
+
+  const respondToAllBlockedTasks = useCallback((response: 'y' | 'n') => {
+    const blockedTaskIds = Object.entries(taskStatuses)
+      .filter(([, status]) => !!status?.isBlocked)
+      .map(([taskId]) => taskId);
+    blockedTaskIds.forEach((taskId) => {
+      window.electronAPI.writePty(taskId, `${response}\r`);
+      void window.electronAPI.fleetRecordEvent(taskId, 'blocked_prompt_response', { response, source: 'bulk' });
+    });
+  }, [taskStatuses]);
 
   useEffect(() => {
     let cancelled = false;
@@ -679,13 +1366,26 @@ export const useOrchestrator = () => {
       const resolvedDefaultCommand = storeData?.defaultCommand || runtimeData?.defaultCommand || 'claude';
       const runtimeActiveTabByProject = sanitizeActiveTabByProjectMap(runtimeData?.activeTabByProject ?? sessionStorageData?.activeTabByProject);
       const sanitizedProjectPermissions = sanitizeProjectPermissions(storeData?.projectPermissions);
+      const sanitizedLivingSpecPreferences = sanitizeLivingSpecPreferences(storeData?.livingSpecPreferences);
 
       setBasePath(resolvedBasePath);
       void validatePath(resolvedBasePath);
       if (storeData?.context) setContext(storeData.context);
         // Env vars are intentionally not loaded from persistent disk storage.
       if (storeData?.defaultCommand) setDefaultCommand(storeData.defaultCommand);
-      if (storeData?.mcpServers) setMcpServers(storeData.mcpServers);
+      if (storeData?.packageStoreStrategy === 'pnpm_global' || storeData?.packageStoreStrategy === 'polyglot_global') {
+        setPackageStoreStrategy(storeData.packageStoreStrategy);
+      }
+      if (storeData?.dependencyCloneMode === 'full_copy') setDependencyCloneMode('full_copy');
+      if (typeof storeData?.pnpmStorePath === 'string') setPnpmStorePath(storeData.pnpmStorePath);
+      if (typeof storeData?.sharedCacheRoot === 'string') setSharedCacheRoot(storeData.sharedCacheRoot);
+      if (typeof storeData?.pnpmAutoInstall === 'boolean') setPnpmAutoInstall(storeData.pnpmAutoInstall);
+      if (storeData?.sandboxMode === 'auto' || storeData?.sandboxMode === 'seatbelt' || storeData?.sandboxMode === 'firejail' || storeData?.sandboxMode === 'off') {
+        setSandboxMode(storeData.sandboxMode);
+      }
+      if (storeData?.networkGuard === 'none' || storeData?.networkGuard === 'off') {
+        setNetworkGuard(storeData.networkGuard);
+      }
 
       const rawActiveTab = runtimeData?.activeTab ?? sessionStorageData?.activeTab ?? null;
       const runtimeTaskUsage = sanitizeTaskUsageMap(runtimeData?.taskUsage ?? sessionStorageData?.taskUsage);
@@ -808,10 +1508,42 @@ export const useOrchestrator = () => {
       setActiveTab(finalActiveTab);
       setActiveTabByProject(finalActiveTabByProject);
       setProjectPermissions(seededProjectPolicies);
+      setLivingSpecPreferences(sanitizedLivingSpecPreferences);
       setTaskUsage(runtimeTaskUsage);
       setTaskTodos(runtimeTaskTodos);
       setTaskStatuses(runtimeTaskStatuses);
-      setPendingApprovals([]);
+
+      const pendingAgentRequests = await window.electronAPI.listPendingAgentRequests()
+        .catch(() => [] as Array<{ requestId: string; taskId: string; action: string; payload: any }>);
+      if (cancelled) return;
+      const hydratedPendingApprovals: PendingApprovalQueueItem[] = (Array.isArray(pendingAgentRequests) ? pendingAgentRequests : [])
+        .map((req) => {
+          const tab = finalTabs.find((item) => item.id === req.taskId);
+          return {
+            requestId: req.requestId,
+            taskId: req.taskId,
+            action: req.action,
+            payload: req.payload,
+            projectPath: tab?.basePath || resolvedBasePath
+          };
+        });
+      setPendingApprovals((prev) => {
+        const nextById = new Map<string, PendingApprovalQueueItem>();
+        prev.forEach((item) => nextById.set(item.requestId, item));
+        hydratedPendingApprovals.forEach((item) => nextById.set(item.requestId, item));
+        return Array.from(nextById.values());
+      });
+      hydratedPendingApprovals.forEach((item) => {
+        const tab = finalTabs.find((entry) => entry.id === item.taskId);
+        pushAttentionEvent({
+          kind: 'approval_required',
+          projectPath: item.projectPath,
+          taskId: item.taskId,
+          taskName: tab?.name || item.taskId,
+          reason: `Approval required for ${item.action}`,
+          requiresAction: true
+        });
+      });
 
       if (!cancelled) setIsLoaded(true);
       await detectAgentsPromise;
@@ -825,18 +1557,115 @@ export const useOrchestrator = () => {
 
   useEffect(() => {
     if (!isLoaded) return;
+    const normalizedProjectPath = normalizeProjectPath(basePath);
+    if (!normalizedProjectPath) return;
+    let cancelled = false;
+
+    const refreshLivingSpec = async () => {
+      const candidates = await detectLivingSpecCandidatesForProject(normalizedProjectPath);
+      if (cancelled) return;
+      if (candidates.length === 0) {
+        setLivingSpecSelectionPrompt((prev) => (prev?.projectPath === normalizedProjectPath ? null : prev));
+        return;
+      }
+
+      const currentPreference = livingSpecPreferencesRef.current[normalizedProjectPath];
+      if (isLivingSpecPreferenceValid(currentPreference, candidates)) {
+        setLivingSpecSelectionPrompt((prev) => (prev?.projectPath === normalizedProjectPath ? null : prev));
+        return;
+      }
+
+      const preferredCandidate = pickPreferredLivingSpecCandidate(candidates);
+      if (preferredCandidate) {
+        setProjectLivingSpecPreference(normalizedProjectPath, {
+          mode: 'single',
+          selectedPath: preferredCandidate.path
+        });
+        setLivingSpecSelectionPrompt((prev) => (prev?.projectPath === normalizedProjectPath ? null : prev));
+        return;
+      }
+
+      if (candidates.length === 1) {
+        setProjectLivingSpecPreference(normalizedProjectPath, {
+          mode: 'single',
+          selectedPath: candidates[0].path
+        });
+        setLivingSpecSelectionPrompt((prev) => (prev?.projectPath === normalizedProjectPath ? null : prev));
+        return;
+      }
+
+      setLivingSpecSelectionPrompt({
+        projectPath: normalizedProjectPath,
+        candidates
+      });
+    };
+
+    void refreshLivingSpec();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isLoaded,
+    basePath,
+    detectLivingSpecCandidatesForProject,
+    isLivingSpecPreferenceValid,
+    setProjectLivingSpecPreference
+  ]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
     // Persist workspace defaults only. Env vars are excluded from disk persistence for safety.
-    void window.electronAPI.saveStore({ basePath, context, defaultCommand, mcpServers, projectPermissions });
-  }, [isLoaded, basePath, context, defaultCommand, mcpServers, projectPermissions]);
+    void window.electronAPI.saveStore({
+      basePath,
+      context,
+      defaultCommand,
+      packageStoreStrategy,
+      dependencyCloneMode,
+      pnpmStorePath,
+      sharedCacheRoot,
+      pnpmAutoInstall,
+      sandboxMode,
+      networkGuard,
+      projectPermissions,
+      livingSpecPreferences
+    });
+  }, [
+    isLoaded,
+    basePath,
+    context,
+    defaultCommand,
+    packageStoreStrategy,
+    dependencyCloneMode,
+    pnpmStorePath,
+    sharedCacheRoot,
+    pnpmAutoInstall,
+    sandboxMode,
+    networkGuard,
+    projectPermissions,
+    livingSpecPreferences
+  ]);
 
   useEffect(() => {
     if (!isLoaded) return;
     // Session state is persisted to survive renderer refreshes and full app restarts.
-    void window.electronAPI.saveRuntimeSession({ basePath, tabs, activeTab, activeTabByProject, taskUsage, taskTodos, taskStatuses });
+    const persistedTaskStatuses = toPersistedTaskStatusMap(taskStatuses);
+    void window.electronAPI.saveRuntimeSession({
+      basePath,
+      tabs,
+      activeTab,
+      activeTabByProject,
+      taskUsage,
+      taskTodos,
+      taskStatuses: persistedTaskStatuses
+    });
 
     if (typeof window !== 'undefined') {
       try {
-        window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ basePath, tabs, activeTab, activeTabByProject, taskUsage, taskTodos, taskStatuses }));
+        window.sessionStorage.setItem(
+          SESSION_STORAGE_KEY,
+          JSON.stringify({ basePath, tabs, activeTab, activeTabByProject, taskUsage, taskTodos, taskStatuses: persistedTaskStatuses })
+        );
       } catch {
         // Ignore session storage write failures.
       }
@@ -1000,22 +1829,54 @@ export const useOrchestrator = () => {
       if (!tabExists) return;
       const usage = extractTaskUsage(payload);
       if (!usage) return;
-      setTaskUsage(prev => ({
-        ...prev,
-        [taskId]: {
-          ...(prev[taskId] || {}),
-          ...usage
+      const now = Date.now();
+      setTaskUsage(prev => {
+        const previousTaskUsage = prev[taskId];
+        const nextTaskUsage: TaskUsage = {
+          ...(previousTaskUsage || {}),
+          ...usage,
+          updatedAt: now
+        };
+
+        if (!hasMeaningfulTaskUsageChange(previousTaskUsage, nextTaskUsage)) {
+          return prev;
         }
-      }));
+
+        const previousUpdatedAt = typeof previousTaskUsage?.updatedAt === 'number'
+          ? previousTaskUsage.updatedAt
+          : 0;
+        const elapsedMs = now - previousUpdatedAt;
+        const isBurstUpdate = elapsedMs > 0 && elapsedMs < 250;
+        if (isBurstUpdate && !hasLargeTaskUsageDelta(previousTaskUsage, nextTaskUsage)) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [taskId]: nextTaskUsage
+        };
+      });
     };
 
     const unsubAgentMessage = window.electronAPI.onAgentMessage((req) => {
       applyUsagePayload(req.taskId, req.payload);
+      const message = typeof req.payload === 'string'
+        ? req.payload.slice(0, 800)
+        : (req.payload && typeof req.payload === 'object'
+          ? JSON.stringify(req.payload).slice(0, 1200)
+          : '');
+      void window.electronAPI.fleetRecordEvent(req.taskId, 'agent_message', {
+        hasMessage: !!message,
+        message
+      });
     });
     unsubscribers.push(unsubAgentMessage);
 
     const unsubAgentUsage = window.electronAPI.onAgentUsage((req) => {
       applyUsagePayload(req.taskId, req.payload);
+      void window.electronAPI.fleetRecordEvent(req.taskId, 'agent_usage_reported', {
+        payload: req.payload && typeof req.payload === 'object' ? req.payload : null
+      });
     });
     unsubscribers.push(unsubAgentUsage);
 
@@ -1041,15 +1902,7 @@ export const useOrchestrator = () => {
           return;
         }
 
-        const normalizedCurrentProject = normalizeProjectPath(basePath);
-        const activeTabs = currentTabs.filter((tab) => {
-          if (!tab.worktreePath) return false;
-          if (!normalizedCurrentProject) return true;
-          return normalizeProjectPath(tab.basePath) === normalizedCurrentProject;
-        });
-        const tabsToEvaluate = activeTabs.length > 0
-          ? activeTabs
-          : currentTabs.filter(tab => !!tab.worktreePath);
+        const tabsToEvaluate = currentTabs.filter(tab => !!tab.worktreePath);
         const modifiedFilesMap: Record<string, string[]> = {};
         const readinessMap: Record<string, boolean> = {};
         const results = await Promise.all(
@@ -1077,6 +1930,7 @@ export const useOrchestrator = () => {
         const collidingFiles: string[] = [];
         const newCollisionState: Record<string, boolean> = {};
         const newDirtyState: Record<string, boolean> = {};
+        const tabById = new Map(currentTabs.map((tab) => [tab.id, tab]));
 
         for (const [file, tabIds] of allFiles.entries()) {
           if (tabIds.length > 1) {
@@ -1089,6 +1943,68 @@ export const useOrchestrator = () => {
 
         for (const tabId of Object.keys(modifiedFilesMap)) {
           newDirtyState[tabId] = modifiedFilesMap[tabId].length > 0;
+        }
+
+        // Cross-worktree context leakage: high-impact changes in one task can break siblings.
+        for (const [sourceTaskId, files] of Object.entries(modifiedFilesMap)) {
+          if (!hasHighImpactFile(files)) continue;
+          const sourceTab = tabById.get(sourceTaskId);
+          if (!sourceTab) continue;
+          const sourceProject = normalizeProjectPath(sourceTab.basePath);
+          const impactFile = files.find((file) => HIGH_IMPACT_FILE_PATTERNS.some((pattern) => pattern.test(file))) || files[0];
+
+          for (const tab of currentTabs) {
+            if (tab.id === sourceTaskId) continue;
+            if (normalizeProjectPath(tab.basePath) !== sourceProject) continue;
+            if (!tab.worktreePath) continue;
+            pushAttentionEvent({
+              kind: 'context_alert',
+              projectPath: tab.basePath,
+              taskId: tab.id,
+              taskName: tab.name,
+              reason: `Shared context updated by ${sourceTab.name}: ${impactFile}`,
+              requiresAction: false
+            });
+          }
+        }
+
+        // Spec-driven orchestration: flag likely drifts from selected Living Spec.
+        for (const [taskId, files] of Object.entries(modifiedFilesMap)) {
+          if (files.length === 0) continue;
+          const tab = tabById.get(taskId);
+          if (!tab) continue;
+          const summary = livingSpecSummariesRef.current[normalizeProjectPath(tab.basePath)];
+          if (!summary) continue;
+
+          const forbidden = new Set((summary.forbiddenExts || []).map((ext) => ext.toLowerCase()));
+          const required = new Set((summary.requiredExts || []).map((ext) => ext.toLowerCase()));
+          const changedExts = new Set(files.map((file) => fileExtension(file)).filter(Boolean));
+          const violatingExt = Array.from(changedExts).find((ext) => forbidden.has(ext));
+          if (violatingExt) {
+            pushAttentionEvent({
+              kind: 'spec_deviation',
+              projectPath: tab.basePath,
+              taskId: tab.id,
+              taskName: tab.name,
+              reason: `Spec expects ${summary.preferredLanguage || 'configured stack'} but task changed ${violatingExt} files.`,
+              requiresAction: true
+            });
+            continue;
+          }
+          if (required.size > 0) {
+            const touchedRequired = Array.from(changedExts).some((ext) => required.has(ext));
+            const touchedCode = Array.from(changedExts).some((ext) => ['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs'].includes(ext));
+            if (touchedCode && !touchedRequired) {
+              pushAttentionEvent({
+                kind: 'spec_deviation',
+                projectPath: tab.basePath,
+                taskId: tab.id,
+                taskName: tab.name,
+                reason: `Spec favors ${summary.preferredLanguage || 'the selected spec'}, but recent edits target a different language set.`,
+                requiresAction: true
+              });
+            }
+          }
         }
 
         setCollisions(collidingFiles);
@@ -1119,7 +2035,16 @@ export const useOrchestrator = () => {
       cancelled = true;
       clearInterval(intervalId);
     };
-  }, [basePath]);
+  }, [pushAttentionEvent]);
+
+  const blockedTasks = tabs
+    .filter((tab) => !!taskStatuses[tab.id]?.isBlocked)
+    .map((tab) => ({
+      taskId: tab.id,
+      taskName: tab.name,
+      projectPath: tab.basePath,
+      reason: taskStatuses[tab.id]?.blockedReason || 'Agent is waiting for confirmation.'
+    }));
 
   return {
     state: {
@@ -1131,16 +2056,29 @@ export const useOrchestrator = () => {
       context,
       envVars,
       defaultCommand,
-      mcpServers,
+      packageStoreStrategy,
+      dependencyCloneMode,
+      pnpmStorePath,
+      sharedCacheRoot,
+      pnpmAutoInstall,
+      sandboxMode,
+      networkGuard,
       availableAgents,
       taskStatuses,
       taskTodos,
       taskUsage,
       collisions,
       pendingApproval,
+      pendingApprovals,
       pendingApprovalCount: pendingApprovals.length,
+      blockedTasks,
+      approvalInboxCount: pendingApprovals.length + blockedTasks.length,
       attentionEvents,
       projectPermissions,
+      livingSpecPreferences,
+      livingSpecCandidatesByProject,
+      livingSpecSummariesByProject,
+      livingSpecSelectionPrompt,
       activeTabByProject
     },
     actions: {
@@ -1151,15 +2089,33 @@ export const useOrchestrator = () => {
       setContext,
       setEnvVars,
       setDefaultCommand,
-      setMcpServers,
+      setPackageStoreStrategy,
+      setDependencyCloneMode,
+      setPnpmStorePath,
+      setSharedCacheRoot,
+      setPnpmAutoInstall,
+      setSandboxMode,
+      setNetworkGuard,
       updateProjectPermission,
+      resolveLivingSpecSelectionPrompt,
+      dismissLivingSpecSelectionPrompt,
       dismissAttentionEvent,
       clearAttentionEvents,
+      forgetProjectState,
       createTask,
+      renameTaskSession,
+      setTaskTags,
       markTaskBootstrapped,
       closeTaskById,
       handoverTask,
       splitTask,
+      restoreExistingWorktree,
+      approveApprovalRequest,
+      rejectApprovalRequest,
+      approveAllPendingRequests,
+      rejectAllPendingRequests,
+      respondToBlockedTask,
+      respondToAllBlockedTasks,
       approvePendingRequest,
       rejectPendingRequest,
       validatePath

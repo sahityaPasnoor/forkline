@@ -1,0 +1,21 @@
+{
+  "name": "normalize_compact_block_reason",
+  "providerHint": "claude",
+  "events": [
+    { "type": "start" },
+    {
+      "type": "output",
+      "data": "Action Required: Claudehaswrittenupaplanandisreadytoexecute.Wouldyouliketoproceed?(y/n)",
+      "expect": {
+        "mode": "blocked",
+        "isBlocked": true,
+        "blockedReason": "Action Required: Claude has written up a plan and is ready to execute. Would you like to proceed?"
+      }
+    }
+  ],
+  "expectFinal": {
+    "mode": "blocked",
+    "isBlocked": true,
+    "provider": "claude"
+  }
+}

@@ -55,6 +55,8 @@ export interface FleetListTasksOptions {
 
 const toInt = (value?: boolean) => (value ? 1 : 0);
 const toNumber = (value: unknown, fallback = 0) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback);
+const TRANSCRIPT_ROW_LIMIT_PER_TASK = 5000;
+const TRANSCRIPT_CONTENT_LIMIT = 4000;
 
 export class FleetStore {
   private db: SqlDatabase | null = null;
@@ -257,6 +259,13 @@ export class FleetStore {
     if (!canonicalTaskId) return;
     const now = Date.now();
     this.recordEventInternal(canonicalTaskId, eventType, payload, now);
+    if (eventType.startsWith('approval_') || eventType.startsWith('agent_') || eventType === 'blocked_prompt_response') {
+      this.appendTranscript(
+        canonicalTaskId,
+        'agent',
+        JSON.stringify({ eventType, payload: payload || {}, createdAt: now })
+      );
+    }
     this.schedulePersist();
   }
 
@@ -323,6 +332,18 @@ export class FleetStore {
     this.schedulePersist();
   }
 
+  public onPtySessionData(runtimeTaskId: string, data: string) {
+    const canonicalTaskId = this.resolveTaskId(runtimeTaskId);
+    if (!canonicalTaskId || typeof data !== 'string' || !data.trim()) return;
+    this.appendTranscript(canonicalTaskId, 'pty_out', data);
+  }
+
+  public onPtySessionInput(runtimeTaskId: string, data: string) {
+    const canonicalTaskId = this.resolveTaskId(runtimeTaskId);
+    if (!canonicalTaskId || typeof data !== 'string' || !data.trim()) return;
+    this.appendTranscript(canonicalTaskId, 'pty_in', data);
+  }
+
   public onPtySessionBlocked(runtimeTaskId: string, isBlocked: boolean, reason?: string) {
     const canonicalTaskId = this.resolveTaskId(runtimeTaskId);
     if (!canonicalTaskId) return;
@@ -343,6 +364,32 @@ export class FleetStore {
       [isBlocked ? 1 : 0, isBlocked ? (reason || null) : null, isBlocked ? 1 : 0, now, canonicalTaskId]
     );
     this.recordEventInternal(canonicalTaskId, isBlocked ? 'blocked' : 'unblocked', { reason: reason || null }, now);
+    this.schedulePersist();
+  }
+
+  public onPtySessionMode(
+    runtimeTaskId: string,
+    mode: string,
+    modeSeq: number,
+    confidence?: string,
+    source?: string,
+    provider?: string,
+    isBlocked?: boolean,
+    blockedReason?: string
+  ) {
+    const canonicalTaskId = this.resolveTaskId(runtimeTaskId);
+    if (!canonicalTaskId) return;
+    const now = Date.now();
+    this.recordEventInternal(canonicalTaskId, 'pty_mode', {
+      runtimeTaskId,
+      mode: mode || 'unknown',
+      modeSeq: Number.isFinite(modeSeq) ? modeSeq : 0,
+      confidence: confidence || null,
+      source: source || null,
+      provider: provider || null,
+      isBlocked: !!isBlocked,
+      blockedReason: blockedReason || null
+    }, now);
     this.schedulePersist();
   }
 
@@ -468,6 +515,43 @@ export class FleetStore {
       closedTasks: toNumber(row.closedTasks, 0),
       archivedTasks: toNumber(row.archivedTasks, 0)
     }));
+  }
+
+  public removeProject(basePath: string) {
+    const normalizedBasePath = String(basePath || '').trim();
+    if (!normalizedBasePath) {
+      return { removedProject: false, removedTasks: 0 };
+    }
+
+    const db = this.requireDb();
+    const existingProject = this.queryOne('SELECT base_path AS basePath FROM projects WHERE base_path = ?', [normalizedBasePath]);
+    const taskRows = this.queryAll(
+      'SELECT task_id AS taskId FROM tasks WHERE base_path = ?',
+      [normalizedBasePath]
+    );
+    const taskIds = Array.from(new Set(taskRows
+      .map((row) => (typeof row.taskId === 'string' ? row.taskId.trim() : ''))
+      .filter(Boolean)));
+
+    if (taskIds.length > 0) {
+      const placeholders = taskIds.map(() => '?').join(', ');
+      db.run(`DELETE FROM task_transcript WHERE task_id IN (${placeholders})`, taskIds);
+      db.run(`DELETE FROM task_events WHERE task_id IN (${placeholders})`, taskIds);
+      db.run(`DELETE FROM task_sessions WHERE task_id IN (${placeholders})`, taskIds);
+      db.run(`DELETE FROM tasks WHERE task_id IN (${placeholders})`, taskIds);
+
+      const removedTaskSet = new Set(taskIds);
+      for (const [runtimeTaskId, canonicalTaskId] of this.runtimeTaskToCanonicalTask.entries()) {
+        if (!removedTaskSet.has(runtimeTaskId) && !removedTaskSet.has(canonicalTaskId)) continue;
+        this.runtimeTaskToCanonicalTask.delete(runtimeTaskId);
+        this.runtimeTaskToSession.delete(runtimeTaskId);
+        this.lastActivityFlushAt.delete(runtimeTaskId);
+      }
+    }
+
+    db.run('DELETE FROM projects WHERE base_path = ?', [normalizedBasePath]);
+    this.schedulePersist();
+    return { removedProject: !!existingProject, removedTasks: taskIds.length };
   }
 
   public listTasks(options: FleetListTasksOptions = {}) {
@@ -625,6 +709,20 @@ export class FleetStore {
       };
     });
 
+    const transcript = this.queryAll(
+      `SELECT id, stream, content, created_at AS createdAt
+       FROM task_transcript
+       WHERE task_id = ?
+       ORDER BY id ASC
+       LIMIT 2000`,
+      [canonicalTaskId]
+    ).map((row) => ({
+      id: toNumber(row.id, 0),
+      stream: String(row.stream || 'pty_out') as 'pty_in' | 'pty_out' | 'agent',
+      content: typeof row.content === 'string' ? row.content : '',
+      createdAt: toNumber(row.createdAt, 0)
+    }));
+
     return {
       task: task
         ? {
@@ -642,7 +740,8 @@ export class FleetStore {
           }
         : null,
       sessions,
-      events
+      events,
+      transcript
     };
   }
 
@@ -692,6 +791,28 @@ export class FleetStore {
       'INSERT INTO task_events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)',
       [taskId, eventType, JSON.stringify(payload || {}), now]
     );
+  }
+
+  private appendTranscript(taskId: string, stream: 'pty_in' | 'pty_out' | 'agent', content: string) {
+    const db = this.requireDb();
+    const now = Date.now();
+    const normalizedContent = content.slice(0, TRANSCRIPT_CONTENT_LIMIT);
+    db.run(
+      'INSERT INTO task_transcript (task_id, stream, content, created_at) VALUES (?, ?, ?, ?)',
+      [taskId, stream, normalizedContent, now]
+    );
+    db.run(
+      `DELETE FROM task_transcript
+       WHERE task_id = ?
+         AND id NOT IN (
+           SELECT id FROM task_transcript
+           WHERE task_id = ?
+           ORDER BY id DESC
+           LIMIT ?
+         )`,
+      [taskId, taskId, TRANSCRIPT_ROW_LIMIT_PER_TASK]
+    );
+    this.schedulePersist();
   }
 
   private queryOne(sql: string, params: SqlPrimitive[] = []) {
@@ -777,11 +898,21 @@ export class FleetStore {
          created_at INTEGER NOT NULL
        )`
     );
+    db.run(
+      `CREATE TABLE IF NOT EXISTS task_transcript (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         task_id TEXT NOT NULL,
+         stream TEXT NOT NULL,
+         content TEXT NOT NULL,
+         created_at INTEGER NOT NULL
+       )`
+    );
     db.run('CREATE INDEX IF NOT EXISTS idx_tasks_base_path ON tasks(base_path)');
     db.run('CREATE INDEX IF NOT EXISTS idx_tasks_archived_closed ON tasks(archived, closed_at)');
     db.run('CREATE INDEX IF NOT EXISTS idx_task_sessions_task_id ON task_sessions(task_id)');
     db.run('CREATE INDEX IF NOT EXISTS idx_task_sessions_runtime_task_id ON task_sessions(runtime_task_id)');
     db.run('CREATE INDEX IF NOT EXISTS idx_task_events_task_id_created_at ON task_events(task_id, created_at DESC)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_task_transcript_task_id_id ON task_transcript(task_id, id DESC)');
   }
 
   private schedulePersist() {

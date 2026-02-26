@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { FolderTree, GitBranch, Activity } from 'lucide-react';
+import { FolderTree, GitBranch, Activity, Trash2 } from 'lucide-react';
 import type { TaskStatus, TaskTab } from '../models/orchestrator';
 
 interface WorktreeInventoryModalProps {
@@ -9,6 +9,8 @@ interface WorktreeInventoryModalProps {
   tabs: TaskTab[];
   statuses: Record<string, TaskStatus>;
   onOpenSession: (taskId: string) => void;
+  onOpenWorktree: (projectPath: string, worktreePath: string, branchName?: string | null) => void;
+  onDeleteWorktree: (projectPath: string, worktreePath: string, branchName?: string | null) => void;
 }
 
 interface WorktreeEntry {
@@ -52,27 +54,36 @@ const WorktreeInventoryModal: React.FC<WorktreeInventoryModalProps> = ({
   projectPaths,
   tabs,
   statuses,
-  onOpenSession
+  onOpenSession,
+  onOpenWorktree,
+  onDeleteWorktree
 }) => {
   const [inventory, setInventory] = useState<Record<string, ProjectInventory>>({});
 
   const uniqueProjects = useMemo(() => {
     return Array.from(new Set(projectPaths.map(p => p.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   }, [projectPaths]);
+  const uniqueProjectsKey = useMemo(() => uniqueProjects.join('\n'), [uniqueProjects]);
 
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
+    const projectsToLoad = uniqueProjects;
+
+    if (projectsToLoad.length === 0) {
+      setInventory({});
+      return;
+    }
 
     const load = async () => {
       const seed: Record<string, ProjectInventory> = {};
-      uniqueProjects.forEach((projectPath) => {
+      projectsToLoad.forEach((projectPath) => {
         seed[projectPath] = { loading: true, worktrees: [] };
       });
       setInventory(seed);
 
       const results = await Promise.all(
-        uniqueProjects.map(async (projectPath) => {
+        projectsToLoad.map(async (projectPath) => {
           const res = await window.electronAPI.listWorktrees(projectPath);
           if (!res.success) {
             return {
@@ -101,7 +112,7 @@ const WorktreeInventoryModal: React.FC<WorktreeInventoryModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, uniqueProjects]);
+  }, [isOpen, uniqueProjectsKey]);
 
   if (!isOpen) return null;
 
@@ -194,9 +205,36 @@ const WorktreeInventoryModal: React.FC<WorktreeInventoryModalProps> = ({
                                 >
                                   open session
                                 </button>
+                                <button
+                                  onClick={() => onDeleteWorktree(projectPath, worktree.path, worktree.branchName)}
+                                  className="btn-danger px-3 py-1 rounded text-[10px] uppercase tracking-wider flex items-center"
+                                  title="Delete this worktree and branch"
+                                >
+                                  <Trash2 size={10} className="mr-1" />
+                                  delete
+                                </button>
                               </>
                             ) : (
-                              <div className="text-[10px] text-[#6b7280] font-mono uppercase tracking-wider">no session</div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => {
+                                    onOpenWorktree(projectPath, worktree.path, worktree.branchName);
+                                    onClose();
+                                  }}
+                                  className="btn-ghost px-3 py-1 rounded text-[10px] uppercase tracking-wider"
+                                  title="Attach this existing worktree to a tab session"
+                                >
+                                  open terminal
+                                </button>
+                                <button
+                                  onClick={() => onDeleteWorktree(projectPath, worktree.path, worktree.branchName)}
+                                  className="btn-danger px-3 py-1 rounded text-[10px] uppercase tracking-wider flex items-center"
+                                  title="Delete this worktree and branch"
+                                >
+                                  <Trash2 size={10} className="mr-1" />
+                                  delete
+                                </button>
+                              </div>
                             )}
                           </div>
                         </div>

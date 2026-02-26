@@ -11,11 +11,16 @@ export interface AgentInfo {
 export interface TaskTab {
   id: string;
   name: string;
+  displayName?: string;
+  tags?: string[];
   agent: string;
   basePath: string;
   worktreePath?: string;
+  parentBranch?: string;
   parentTaskId?: string;
   prompt?: string;
+  launchCommandOverride?: string;
+  livingSpecOverridePath?: string;
   capabilities?: AgentCapabilities;
   hasBootstrapped?: boolean;
 }
@@ -68,13 +73,64 @@ export interface ProjectPermissionPolicy {
   promptResponse: 'y' | 'n';
 }
 
+export interface LivingSpecCandidate {
+  path: string;
+  kind: string;
+}
+
+export interface LivingSpecPreference {
+  mode: 'single' | 'consolidated';
+  selectedPath?: string;
+}
+
+export interface LivingSpecSelectionPrompt {
+  projectPath: string;
+  candidates: LivingSpecCandidate[];
+}
+
 export interface AttentionEvent {
   id: string;
-  kind: 'blocked' | 'approval_required' | 'approval_auto_approved';
+  kind: 'blocked' | 'approval_required' | 'approval_auto_approved' | 'context_alert' | 'spec_deviation';
   projectPath: string;
   taskId: string;
   taskName: string;
   reason: string;
   createdAt: number;
   requiresAction: boolean;
+}
+
+export interface HandoverPacket {
+  generatedAt: number;
+  taskId: string;
+  taskName: string;
+  worktreePath?: string;
+  sourceAgent: string;
+  targetAgent: string;
+  parentBranch?: string;
+  currentBranch?: string;
+  objective?: string;
+  operatorInstruction: string;
+  git: {
+    modifiedCount: number;
+    modifiedFiles: string[];
+    truncated: boolean;
+  };
+  task: {
+    isBlocked: boolean;
+    blockedReason?: string;
+    todos: AgentTodo[];
+    todoSummary: string;
+  };
+  usage?: TaskUsage;
+  artifactPath?: string;
+  transferBrief: string;
+}
+
+export type HandoverMode = 'clean' | 'in_place';
+
+export interface HandoverResult {
+  success: boolean;
+  packet?: HandoverPacket;
+  mode?: HandoverMode;
+  error?: string;
 }
