@@ -6,7 +6,12 @@ import '@xterm/xterm/css/xterm.css';
 import type { LivingSpecPreference, TaskUsage } from '../models/orchestrator';
 import { formatTaskCost, formatTaskUsage } from '../lib/usageUtils';
 import { detectAgentCapabilities, resolveQuickActionPlan, type QuickActionId, type QuickActionStep } from '../lib/quickActions';
-import { buildAgentLaunchPlan, resolveAgentProfile } from '../lib/agentProfiles';
+import {
+  applyAgentPermissionMode,
+  buildAgentLaunchPlan,
+  resolveAgentProfile,
+  type AgentPermissionMode
+} from '../lib/agentProfiles';
 
 interface TerminalProps {
   taskId: string;
@@ -15,6 +20,7 @@ interface TerminalProps {
   context?: string;
   envVars?: string;
   prompt?: string;
+  permissionMode?: AgentPermissionMode;
   launchCommandOverride?: string;
   projectPath: string;
   parentBranch?: string;
@@ -53,7 +59,7 @@ interface PtyModeSnapshot {
   blockedReason?: string;
 }
 
-type RelaunchPhase = 'restoring' | 'preparing_workspace' | 'launching_agent';
+type RelaunchPhase = 'restoring' | 'preparing_workspace' | 'launching_agent' | 'waiting_for_agent';
 
 interface RelaunchProgressState {
   phase: RelaunchPhase;
@@ -70,6 +76,7 @@ interface PtySandboxSnapshot {
 const isShellLikeMode = (mode: string) => mode === 'shell' || mode === 'exited';
 const isAgentLikeMode = (mode: string) => mode === 'agent' || mode === 'blocked' || mode === 'tui';
 const isResumeEligibleMode = (mode: string) => isShellLikeMode(mode) || mode === 'booting';
+const hasPrintableTerminalText = (chunk: string) => /[^\x00-\x1f\x7f]/.test(chunk);
 const isCsiResponseParam = (value: string) => (
   (value >= '0' && value <= '9')
   || value === ';'
@@ -243,6 +250,7 @@ const areTerminalPropsEqual = (prev: TerminalProps, next: TerminalProps) => (
   && prev.context === next.context
   && prev.envVars === next.envVars
   && prev.prompt === next.prompt
+  && (prev.permissionMode || 'default') === (next.permissionMode || 'default')
   && prev.launchCommandOverride === next.launchCommandOverride
   && prev.projectPath === next.projectPath
   && prev.parentBranch === next.parentBranch
@@ -331,6 +339,7 @@ const Terminal: React.FC<TerminalProps> = ({
   context,
   envVars,
   prompt,
+  permissionMode = 'default',
   launchCommandOverride,
   projectPath,
   parentBranch,
@@ -368,16 +377,22 @@ const Terminal: React.FC<TerminalProps> = ({
   const modeSnapshotRef = useRef<PtyModeSnapshot>({ mode: 'booting', modeSeq: 0, isBlocked: false });
   const ptyRunningRef = useRef(false);
   const ptyStartInFlightRef = useRef(false);
+  const ptyStartErrorRef = useRef<string | null>(null);
+  const awaitingAgentReadyRef = useRef(false);
+  const awaitingAgentReadyTimeoutRef = useRef<number | null>(null);
   const agentLikelyActiveRef = useRef(false);
   const shouldBootstrapRef = useRef(shouldBootstrap);
   const pendingShellPlanRef = useRef<PendingShellPlan | null>(null);
   const [terminalMode, setTerminalMode] = useState('booting');
   const [quickActionNotice, setQuickActionNotice] = useState<string | null>(null);
+  const [ptyStartError, setPtyStartError] = useState<string | null>(null);
   const [relaunchProgress, setRelaunchProgress] = useState<RelaunchProgressState | null>(null);
   const [sandboxSnapshot, setSandboxSnapshot] = useState<PtySandboxSnapshot | null>(null);
   const [showSessionLoadProgress, setShowSessionLoadProgress] = useState(false);
+  const [hasTerminalOutput, setHasTerminalOutput] = useState(false);
   const quickActionNoticeTimeoutRef = useRef<number | null>(null);
   const sessionLoadProgressTimerRef = useRef<number | null>(null);
+  const hasTerminalOutputRef = useRef(false);
   const isDisposedRef = useRef(false);
   const pendingPtyContinuationsRef = useRef<PendingPtyContinuation[]>([]);
   const shellInputCarryRef = useRef('');
@@ -387,6 +402,11 @@ const Terminal: React.FC<TerminalProps> = ({
   const onBootstrappedRef = useRef(onBootstrapped);
   const capabilitiesProfile = useMemo(() => detectAgentCapabilities(agentCommand), [agentCommand]);
   const agentProfile = useMemo(() => resolveAgentProfile(agentCommand), [agentCommand]);
+  const effectivePermissionMode: AgentPermissionMode = permissionMode === 'bypass' ? 'bypass' : 'default';
+  const runtimeAgentCommand = useMemo(
+    () => applyAgentPermissionMode(agentCommand, effectivePermissionMode),
+    [agentCommand, effectivePermissionMode]
+  );
   const [hasLiveMode, setHasLiveMode] = useState(false);
   const [liveBlockedState, setLiveBlockedState] = useState<{ isBlocked: boolean; blockedReason?: string }>({
     isBlocked: !!isBlocked,
@@ -413,6 +433,15 @@ const Terminal: React.FC<TerminalProps> = ({
     if (agentLikelyActiveRef.current === next) return;
     agentLikelyActiveRef.current = next;
   }, []);
+  const markTerminalOutputSeen = useCallback(() => {
+    if (hasTerminalOutputRef.current) return;
+    hasTerminalOutputRef.current = true;
+    setHasTerminalOutput(true);
+  }, []);
+  const resetTerminalOutputSeen = useCallback(() => {
+    hasTerminalOutputRef.current = false;
+    setHasTerminalOutput(false);
+  }, []);
   const setRelaunchProgressPhase = useCallback((phase: RelaunchPhase, detail?: string) => {
     setRelaunchProgress({ phase, detail });
   }, []);
@@ -423,6 +452,7 @@ const Terminal: React.FC<TerminalProps> = ({
     if (!relaunchProgress) return null;
     if (relaunchProgress.phase === 'restoring') return { label: 'Restoring session', percent: 30 };
     if (relaunchProgress.phase === 'preparing_workspace') return { label: 'Preparing workspace metadata', percent: 65 };
+    if (relaunchProgress.phase === 'waiting_for_agent') return { label: 'Starting agent runtime', percent: 97 };
     return { label: 'Relaunching agent', percent: 92 };
   }, [relaunchProgress]);
   const startupProgressMeta = useMemo(() => {
@@ -440,38 +470,93 @@ const Terminal: React.FC<TerminalProps> = ({
       detail: 'Attaching PTY and restoring task state for this tab.'
     };
   }, [relaunchProgress, relaunchProgressMeta, showSessionLoadProgress]);
-  const dispatchRelaunchCommand = useCallback((command: string) => {
+  const showStartupOverlay = !!startupProgressMeta && !hasTerminalOutput;
+  const showStartupInlineProgress = !!startupProgressMeta && hasTerminalOutput;
+  const startupNeedsAttention = startupProgressMeta?.label === 'Starting agent runtime';
+  const clearAwaitingAgentReady = useCallback(() => {
+    awaitingAgentReadyRef.current = false;
+    if (awaitingAgentReadyTimeoutRef.current !== null) {
+      window.clearTimeout(awaitingAgentReadyTimeoutRef.current);
+      awaitingAgentReadyTimeoutRef.current = null;
+    }
+  }, []);
+  const beginAwaitingAgentReady = useCallback(() => {
+    awaitingAgentReadyRef.current = true;
+    if (awaitingAgentReadyTimeoutRef.current !== null) {
+      window.clearTimeout(awaitingAgentReadyTimeoutRef.current);
+      awaitingAgentReadyTimeoutRef.current = null;
+    }
+    setRelaunchProgressPhase('waiting_for_agent', 'Waiting for agent startup output.');
+    awaitingAgentReadyTimeoutRef.current = window.setTimeout(() => {
+      awaitingAgentReadyTimeoutRef.current = null;
+      if (!awaitingAgentReadyRef.current) return;
+      awaitingAgentReadyRef.current = false;
+      clearRelaunchProgress();
+      terminalInstance.current?.writeln('\r\n[orchestrator] Agent launch is taking longer than expected. Terminal remains available while it starts.');
+    }, 15000);
+  }, [clearRelaunchProgress, setRelaunchProgressPhase]);
+  const dispatchRelaunchCommand = useCallback(async (command: string) => {
     const normalizedCommand = String(command || '').trim();
-    if (!normalizedCommand) return;
+    if (!normalizedCommand) return false;
+    if (ptyStartErrorRef.current) {
+      clearAwaitingAgentReady();
+      clearRelaunchProgress();
+      setAgentModeLikely(false);
+      return false;
+    }
     const MAX_ATTEMPTS = 8;
-    const tryLaunch = (attempt = 0) => {
-      void window.electronAPI.launchPty(taskId, normalizedCommand, { suppressEcho: true })
-        .then((result) => {
-          if (result?.success) return;
-          const message = String(result?.error || '');
-          if (attempt < MAX_ATTEMPTS && /not running|session not found/i.test(message)) {
-            const relaunchEnv = ptyEnvRef.current || {};
-            window.electronAPI.createPty(taskId, cwd, relaunchEnv);
-            window.setTimeout(() => {
-              if (isDisposedRef.current) return;
-              tryLaunch(attempt + 1);
-            }, Math.min(1200, 140 * (attempt + 1)));
-            return;
-          }
+    for (let attempt = 0; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      try {
+        const result = await window.electronAPI.launchPty(taskId, normalizedCommand, { suppressEcho: true });
+        if (result?.success) {
+          beginAwaitingAgentReady();
+          return true;
+        }
+        const message = String(result?.error || '');
+        if (/not running|session not found/i.test(message) && ptyStartErrorRef.current) {
+          clearAwaitingAgentReady();
           clearRelaunchProgress();
           setAgentModeLikely(false);
-          terminalInstance.current?.writeln(`\r\n[orchestrator] Failed to relaunch agent: ${message || 'unknown error'}`);
-        })
-        .catch((error) => {
-          const message = error instanceof Error ? error.message : 'unknown error';
-          clearRelaunchProgress();
-          setAgentModeLikely(false);
-          terminalInstance.current?.writeln(`\r\n[orchestrator] Failed to relaunch agent: ${message}`);
-        });
-    };
-    tryLaunch(0);
-  }, [taskId, cwd, clearRelaunchProgress, setAgentModeLikely]);
+          return false;
+        }
+        if (attempt < MAX_ATTEMPTS && /not running|session not found/i.test(message)) {
+          const relaunchEnv = ptyEnvRef.current || {};
+          window.electronAPI.createPty(taskId, cwd, relaunchEnv);
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((resolve) => window.setTimeout(resolve, Math.min(1200, 140 * (attempt + 1))));
+          if (isDisposedRef.current) return false;
+          continue;
+        }
+        clearAwaitingAgentReady();
+        clearRelaunchProgress();
+        setAgentModeLikely(false);
+        terminalInstance.current?.writeln(`\r\n[orchestrator] Failed to relaunch agent: ${message || 'unknown error'}`);
+        return false;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'unknown error';
+        if (attempt < MAX_ATTEMPTS && /not running|session not found/i.test(message)) {
+          const relaunchEnv = ptyEnvRef.current || {};
+          window.electronAPI.createPty(taskId, cwd, relaunchEnv);
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((resolve) => window.setTimeout(resolve, Math.min(1200, 140 * (attempt + 1))));
+          if (isDisposedRef.current) return false;
+          continue;
+        }
+        clearAwaitingAgentReady();
+        clearRelaunchProgress();
+        setAgentModeLikely(false);
+        terminalInstance.current?.writeln(`\r\n[orchestrator] Failed to relaunch agent: ${message}`);
+        return false;
+      }
+    }
+    clearAwaitingAgentReady();
+    clearRelaunchProgress();
+    setAgentModeLikely(false);
+    terminalInstance.current?.writeln('\r\n[orchestrator] Failed to relaunch agent: timed out.');
+    return false;
+  }, [taskId, cwd, clearAwaitingAgentReady, clearRelaunchProgress, setAgentModeLikely, beginAwaitingAgentReady]);
   const beginSessionLoadProgress = useCallback(() => {
+    resetTerminalOutputSeen();
     if (sessionLoadProgressTimerRef.current !== null) {
       window.clearTimeout(sessionLoadProgressTimerRef.current);
       sessionLoadProgressTimerRef.current = null;
@@ -480,7 +565,7 @@ const Terminal: React.FC<TerminalProps> = ({
       setShowSessionLoadProgress(true);
       sessionLoadProgressTimerRef.current = null;
     }, 60);
-  }, []);
+  }, [resetTerminalOutputSeen]);
   const clearSessionLoadProgress = useCallback(() => {
     if (sessionLoadProgressTimerRef.current !== null) {
       window.clearTimeout(sessionLoadProgressTimerRef.current);
@@ -519,6 +604,10 @@ const Terminal: React.FC<TerminalProps> = ({
     }
     return null;
   }, [sandboxSnapshot]);
+  const ptyStartupBanner = useMemo(() => {
+    if (!ptyStartError) return null;
+    return `PTY startup failed: ${ptyStartError}`;
+  }, [ptyStartError]);
 
   const ensureCursorVisible = useCallback(() => {
     if (!ptyRunningRef.current) return;
@@ -567,7 +656,7 @@ const Terminal: React.FC<TerminalProps> = ({
       FORKLINE_PACKAGE_STORE_STRATEGY: packageStoreStrategy || 'off',
       FORKLINE_SANDBOX_MODE: sandboxMode || 'off',
       FORKLINE_NETWORK_GUARD: networkGuard || 'off',
-      FORKLINE_AGENT_COMMAND: agentCommand,
+      FORKLINE_AGENT_COMMAND: runtimeAgentCommand,
       FORKLINE_AGENT_PROVIDER: agentProfile.id
     };
     if (pnpmStorePath?.trim()) {
@@ -589,7 +678,7 @@ const Terminal: React.FC<TerminalProps> = ({
     }
 
     return customEnv;
-  }, [envVars, fallbackTaskControlUrl, sandboxMode, networkGuard, packageStoreStrategy, pnpmStorePath, sharedCacheRoot, livingSpecOverridePath, resolvedLivingSpecPath, agentCommand, agentProfile.id]);
+  }, [envVars, fallbackTaskControlUrl, sandboxMode, networkGuard, packageStoreStrategy, pnpmStorePath, sharedCacheRoot, livingSpecOverridePath, resolvedLivingSpecPath, runtimeAgentCommand, agentProfile.id]);
 
   useEffect(() => {
     onBootstrappedRef.current = onBootstrapped;
@@ -608,6 +697,10 @@ const Terminal: React.FC<TerminalProps> = ({
       if (sessionLoadProgressTimerRef.current !== null) {
         window.clearTimeout(sessionLoadProgressTimerRef.current);
         sessionLoadProgressTimerRef.current = null;
+      }
+      if (awaitingAgentReadyTimeoutRef.current !== null) {
+        window.clearTimeout(awaitingAgentReadyTimeoutRef.current);
+        awaitingAgentReadyTimeoutRef.current = null;
       }
     };
   }, []);
@@ -655,18 +748,24 @@ const Terminal: React.FC<TerminalProps> = ({
     setTerminalMode(mode);
 
     if (snapshot.isBlocked) {
+      clearAwaitingAgentReady();
       clearRelaunchProgress();
       setAgentModeLikely(true);
       return;
     }
 
     if (isShellLikeMode(mode)) {
+      if (awaitingAgentReadyRef.current) {
+        setAgentModeLikely(true);
+        return;
+      }
       clearRelaunchProgress();
       setAgentModeLikely(false);
       ensureCursorVisible();
       return;
     }
     if (isAgentLikeMode(mode)) {
+      clearAwaitingAgentReady();
       clearRelaunchProgress();
       setAgentModeLikely(true);
       return;
@@ -674,7 +773,7 @@ const Terminal: React.FC<TerminalProps> = ({
     if (mode === 'booting') {
       setAgentModeLikely(true);
     }
-  }, [clearRelaunchProgress, ensureCursorVisible, setAgentModeLikely]);
+  }, [clearAwaitingAgentReady, clearRelaunchProgress, ensureCursorVisible, setAgentModeLikely]);
 
   useEffect(() => {
     const term = terminalInstance.current;
@@ -843,10 +942,15 @@ const Terminal: React.FC<TerminalProps> = ({
         });
 
         removePtyListener = window.electronAPI.onPtyData(taskId, (data) => {
-          clearSessionLoadProgress();
+          if (!awaitingAgentReadyRef.current) {
+            clearSessionLoadProgress();
+          }
+          if (hasPrintableTerminalText(String(data || ''))) {
+            markTerminalOutputSeen();
+          }
           term?.write(data);
         });
-        removePtyStateListener = window.electronAPI.onPtyState(taskId, ({ created, running, restarted, sandbox }) => {
+        removePtyStateListener = window.electronAPI.onPtyState(taskId, ({ created, running, restarted, startError, sandbox }) => {
           if (disposed || isDisposedRef.current) return;
           if (sandbox && typeof sandbox === 'object') {
             setSandboxSnapshot({
@@ -860,12 +964,27 @@ const Terminal: React.FC<TerminalProps> = ({
           }
           ptyRunningRef.current = !!running;
           ptyStartInFlightRef.current = false;
+          const normalizedStartError = typeof startError === 'string' ? startError.trim() : '';
+          ptyStartErrorRef.current = normalizedStartError || null;
+          if (running) {
+            setPtyStartError(null);
+          } else if (normalizedStartError) {
+            clearAwaitingAgentReady();
+            setPtyStartError(normalizedStartError);
+            clearSessionLoadProgress();
+            clearRelaunchProgress();
+            setAgentModeLikely(false);
+            didBootstrap = true;
+          }
           if (running) {
             const queued = pendingPtyContinuationsRef.current.splice(0);
             queued.forEach(({ continuation, timeoutId }) => {
               window.clearTimeout(timeoutId);
               continuation();
             });
+          }
+          if (normalizedStartError) {
+            return;
           }
           if (didBootstrap) return;
           didBootstrap = true;
@@ -894,8 +1013,8 @@ const Terminal: React.FC<TerminalProps> = ({
             if (disposed || isDisposedRef.current) return;
             const taskControlUrl = controlTaskUrlRef.current;
             const launchPlan = currentShouldBootstrap && launchCommandOverride?.trim()
-              ? { command: launchCommandOverride.trim() }
-              : buildAgentLaunchPlan(agentCommand, prompt);
+              ? { command: applyAgentPermissionMode(launchCommandOverride.trim(), effectivePermissionMode) }
+              : buildAgentLaunchPlan(agentCommand, prompt, { permissionMode: effectivePermissionMode });
             const apiDoc = `IDE Capabilities API\n--------------------\nYou are running inside Forkline.\nYou can interact with the IDE by sending HTTP requests to the local control server.\n\nBase URL: ${taskControlUrl}\nAuthentication:\n- Header: x-forkline-token: $MULTI_AGENT_IDE_TOKEN\n- Alternate: Authorization: Bearer $MULTI_AGENT_IDE_TOKEN\nCurrent Permissions:\n- Merge Request: ${capabilities?.autoMerge ? 'Auto-Approve' : 'Requires Human Approval'}\n\nWorkspace Metadata Paths:\n- Living Spec (if available): ${resolvedLivingSpecPath}\n- Memory Context: .agent_cache/agent_memory.md\n\nEndpoints:\n1. POST ${taskControlUrl}/merge (returns 202 + requestId)\n2. GET ${taskControlUrl.replace('/api/task/' + taskId, '')}/api/approval/:requestId (poll merge status)\n3. POST ${taskControlUrl}/todos\n4. POST ${taskControlUrl}/message\n5. POST ${taskControlUrl}/usage (or /metrics)\n\nMerge wait mode:\n- Use ${taskControlUrl}/merge?wait=1 to wait for a decision inline (times out after 10 minutes).\n\ncurl example:\ncurl -s -H \"x-forkline-token: $MULTI_AGENT_IDE_TOKEN\" -H \"content-type: application/json\" -X POST ${taskControlUrl}/todos -d '{\"todos\":[{\"id\":\"1\",\"title\":\"Implement fix\",\"status\":\"in_progress\"}]}'\n`;
             setRelaunchProgressPhase('preparing_workspace');
             void window.electronAPI
@@ -922,7 +1041,7 @@ const Terminal: React.FC<TerminalProps> = ({
                   ? `./${launchScriptPath}`
                   : launchPlan.command;
                 setRelaunchProgressPhase('launching_agent');
-                dispatchRelaunchCommand(resolvedLaunchCommand);
+                void dispatchRelaunchCommand(resolvedLaunchCommand);
                 setAgentModeLikely(true);
                 lastAgentLaunchAtRef.current = Date.now();
                 onBootstrappedRef.current?.(taskId);
@@ -932,7 +1051,7 @@ const Terminal: React.FC<TerminalProps> = ({
                 console.error('Failed to prepare workspace metadata:', err);
                 term?.writeln('\r\n[orchestrator] Workspace metadata setup failed. Continuing.');
                 setRelaunchProgressPhase('launching_agent', 'workspace metadata setup failed; launching with fallback');
-                dispatchRelaunchCommand(launchPlan.command);
+                void dispatchRelaunchCommand(launchPlan.command);
                 setAgentModeLikely(true);
                 lastAgentLaunchAtRef.current = Date.now();
                 onBootstrappedRef.current?.(taskId);
@@ -949,8 +1068,11 @@ const Terminal: React.FC<TerminalProps> = ({
           });
         });
         removePtyExitListener = window.electronAPI.onPtyExit(taskId, ({ exitCode, signal }) => {
+          clearAwaitingAgentReady();
           clearSessionLoadProgress();
           clearRelaunchProgress();
+          setPtyStartError(null);
+          ptyStartErrorRef.current = null;
           ptyRunningRef.current = false;
           ptyStartInFlightRef.current = false;
           didBootstrap = false;
@@ -993,6 +1115,9 @@ const Terminal: React.FC<TerminalProps> = ({
             if (disposed || isDisposedRef.current) return;
             ptyEnvRef.current = customEnv;
             ptyStartInFlightRef.current = true;
+            clearAwaitingAgentReady();
+            ptyStartErrorRef.current = null;
+            setPtyStartError(null);
             modeSeqRef.current = -1;
             terminalModeRef.current = 'booting';
             modeSnapshotRef.current = { mode: 'booting', modeSeq: 0, isBlocked: false };
@@ -1065,8 +1190,11 @@ const Terminal: React.FC<TerminalProps> = ({
       const queued = pendingPtyContinuationsRef.current.splice(0);
       queued.forEach(({ timeoutId }) => window.clearTimeout(timeoutId));
       clearPendingShellPlan();
+      clearAwaitingAgentReady();
       ptyRunningRef.current = false;
       ptyStartInFlightRef.current = false;
+      ptyStartErrorRef.current = null;
+      setPtyStartError(null);
       shellInputCarryRef.current = '';
       recentControlResponseRef.current = false;
       modeSeqRef.current = -1;
@@ -1089,12 +1217,14 @@ const Terminal: React.FC<TerminalProps> = ({
     setAgentModeLikely,
     applyModeSnapshot,
     clearPendingShellPlan,
+    clearAwaitingAgentReady,
     clearRelaunchProgress,
     setRelaunchProgressPhase,
     scheduleTerminalFit,
     beginSessionLoadProgress,
     clearSessionLoadProgress,
-    dispatchRelaunchCommand
+    dispatchRelaunchCommand,
+    effectivePermissionMode
   ]);
 
   const focusTerminal = () => {
@@ -1197,6 +1327,10 @@ const Terminal: React.FC<TerminalProps> = ({
 
   const ensurePtyRunning = useCallback((continuation: () => void) => {
     if (isDisposedRef.current) return;
+    if (ptyStartErrorRef.current) {
+      writeOrchestratorHint('PTY startup failed. Fix environment/worktree and retry.');
+      return;
+    }
     if (ptyRunningRef.current) {
       continuation();
       return;
@@ -1212,6 +1346,10 @@ const Terminal: React.FC<TerminalProps> = ({
         ptyStartInFlightRef.current = false;
       }
       if (!ptyRunningRef.current) {
+        if (ptyStartErrorRef.current) {
+          writeOrchestratorHint('PTY startup failed. Fix environment/worktree and retry.');
+          return;
+        }
         writeOrchestratorHint('PTY startup is still in progress. Retry the action in a moment.');
         const relaunchEnv = ptyEnvRef.current || buildPtyEnv(controlTaskUrlRef.current || fallbackTaskControlUrl);
         ptyEnvRef.current = relaunchEnv;
@@ -1254,7 +1392,7 @@ const Terminal: React.FC<TerminalProps> = ({
       }
       if (step.kind === 'launch_agent') {
         sendRaw('\u0015');
-        const launched = await sendHiddenLine(agentCommand);
+        const launched = await sendHiddenLine(runtimeAgentCommand);
         if (!launched) break;
         lastAgentLaunchAtRef.current = Date.now();
         if (step.postInstruction?.trim()) {
@@ -1266,7 +1404,7 @@ const Terminal: React.FC<TerminalProps> = ({
         }
       }
     }
-  }, [agentCommand, sendRaw, sendHiddenLine, writeOrchestratorHint]);
+  }, [runtimeAgentCommand, sendRaw, sendHiddenLine, writeOrchestratorHint]);
 
   const queueShellPlan = useCallback((steps: QuickActionStep[]) => {
     if (isDisposedRef.current) return;
@@ -1339,7 +1477,7 @@ const Terminal: React.FC<TerminalProps> = ({
         profile: capabilitiesProfile.profile
       });
       ensurePtyRunning(() => {
-        const launchPlan = buildAgentLaunchPlan(agentCommand, undefined);
+        const launchPlan = buildAgentLaunchPlan(agentCommand, undefined, { permissionMode: effectivePermissionMode });
         sendRaw('\u0015');
         void sendHiddenLine(launchPlan.command).then((sent) => {
           if (!sent) {
@@ -1409,6 +1547,7 @@ const Terminal: React.FC<TerminalProps> = ({
     });
   }, [
     agentCommand,
+    effectivePermissionMode,
     capabilitiesProfile.profile,
     ensurePtyRunning,
     hasLiveMode,
@@ -1482,9 +1621,9 @@ const Terminal: React.FC<TerminalProps> = ({
           terminalInstance.current?.focus();
         }}
       >
-        {startupProgressMeta && (
+        {showStartupOverlay && startupProgressMeta && (
           <div className="terminal-startup-overlay" role="status" aria-live="polite">
-            <div className="terminal-startup-overlay-card">
+            <div className={`terminal-startup-overlay-card ${startupNeedsAttention ? 'terminal-startup-overlay-card--attention' : ''}`}>
               <div className="terminal-startup-progress-head">
                 <span>{startupProgressMeta.label}</span>
                 <span>{startupProgressMeta.percent}%</span>
@@ -1507,6 +1646,12 @@ const Terminal: React.FC<TerminalProps> = ({
       </div>
 
       <div className="terminal-action-bar flex flex-col shrink-0 relative z-30">
+        {ptyStartupBanner && (
+          <div className="terminal-guardrail-banner terminal-guardrail-banner--warning" role="status" aria-live="polite">
+            <AlertTriangle size={12} className="flex-shrink-0" />
+            <span>{ptyStartupBanner}</span>
+          </div>
+        )}
         {sandboxBanner && (
           <div
             className={`terminal-guardrail-banner ${sandboxBanner.tone === 'warning' ? 'terminal-guardrail-banner--warning' : 'terminal-guardrail-banner--info'}`}
@@ -1517,8 +1662,8 @@ const Terminal: React.FC<TerminalProps> = ({
             <span>{sandboxBanner.message}</span>
           </div>
         )}
-        {startupProgressMeta && (
-          <div className="terminal-startup-progress" role="status" aria-live="polite">
+        {showStartupInlineProgress && startupProgressMeta && (
+          <div className={`terminal-startup-progress ${startupNeedsAttention ? 'terminal-startup-progress--attention' : ''}`} role="status" aria-live="polite">
             <div className="terminal-startup-progress-head">
               <span>{startupProgressMeta.label}</span>
               <span>{startupProgressMeta.percent}%</span>

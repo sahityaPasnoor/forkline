@@ -37,9 +37,16 @@ npm run core:start
      - Other providers should use `Start New Session`.
      - Gemini/Amp: Forkline shows live sessions to pick from.
      - Claude/Codex: use latest, manual session id, or provider picker in terminal.
-4. Work inside the task terminal.
-5. Review diff/status.
-6. Merge task branch or delete task worktree.
+4. Optional: in `Spawn Agent`, enable `Bypass agent permission prompts` for this task.
+   - Forkline appends provider flags only when supported:
+     - `claude`: `--permission-mode bypassPermissions`
+     - `codex`: `--dangerously-bypass-approvals-and-sandbox`
+     - `gemini`: `--approval-mode yolo`
+     - `amp`: `--dangerously-allow-all`
+   - Unsupported agents keep normal approval behavior.
+5. Work inside the task terminal.
+6. Review diff/status.
+7. Merge task branch or delete task worktree.
 
 ## 3. Use the project in headless mode
 
@@ -85,3 +92,13 @@ If `/v1/pty/create` returns `"running": false`, the session exists but the PTY p
 - Merge and cleanup (`/v1/git/worktree/merge` or `/v1/git/worktree/remove`)
 
 See the full endpoint table in [Core API](/reference/core-api).
+
+## 5. Resolve collision warnings (GUI)
+
+Forkline now scopes collisions per project. A collision banner only appears in the active project where overlapping file edits exist.
+
+Use the banner actions:
+
+1. `Re-check` to refresh current project collision state.
+2. `How to fix` to view guided steps.
+3. `Dismiss` to hide the current collision snapshot for that project until the collision set changes.

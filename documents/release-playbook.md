@@ -43,26 +43,6 @@ This validates:
 - npm tarball includes required runtime modules (`packages/core`, protocol)
 - electron-builder includes required runtime files in desktop packaging
 
-## 2.1 One-command automation
-
-Base automation:
-
-```bash
-npm run release:automate
-```
-
-Full release flow example (with personal mac signing identity, version bump, push, and npm publish):
-
-```bash
-export FORKLINE_MAC_IDENTITY="Developer ID Application: <Your Name or Org> (<TEAMID>)"
-npm run release:automate -- --sync-dev --sign-mac --version patch --push-main --push-tags --publish-npm
-```
-
-Optional extras:
-- add `--with-pty-replay` to run replay fixtures
-- add `--with-playwright` to run Electron smoke test
-- add `--dry-run` to print planned commands only
-
 ## 3. Build local desktop installers
 
 ```bash

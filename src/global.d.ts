@@ -109,7 +109,7 @@ declare global {
       writePty: (taskId: string, data: string) => void;
       launchPty: (taskId: string, command: string, options?: { suppressEcho?: boolean }) => Promise<{ success: boolean; error?: string }>;
       resizePty: (taskId: string, cols: number, rows: number) => void;
-      restartPty: (taskId: string) => Promise<{ success: boolean; running?: boolean; restarted?: boolean; error?: string }>;
+      restartPty: (taskId: string) => Promise<{ success: boolean; running?: boolean; restarted?: boolean; error?: string; startError?: string }>;
       detachPty: (taskId: string) => void;
       destroyPty: (taskId: string) => void;
       listPtySessions: () => Promise<{
@@ -129,6 +129,7 @@ declare global {
           lastActivityAt: number;
           exitCode: number | null;
           signal?: number;
+          startError?: string;
           bufferSize: number;
           tailPreview?: string[];
           resource?: { taskId: string; sessionId: string; port: number; host: string } | null;
@@ -144,6 +145,7 @@ declare global {
           created: boolean;
           running: boolean;
           restarted?: boolean;
+          startError?: string;
           sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
         }) => void
       ) => () => void;

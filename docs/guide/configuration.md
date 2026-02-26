@@ -29,4 +29,19 @@
 - Browser-origin local requests are denied.
 - Workspace environment variables are not persisted to disk.
 
+## Spawn Permission Bypass (GUI)
+
+In `Spawn Agent`, each task can enable `Bypass agent permission prompts`.
+
+Forkline maps that toggle to provider CLI flags only when supported:
+
+| Provider command | Flag appended by Forkline |
+|---|---|
+| `claude` | `--permission-mode bypassPermissions` |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox` |
+| `gemini` | `--approval-mode yolo` |
+| `amp` | `--dangerously-allow-all` |
+
+Unsupported agent commands ignore this toggle and continue with normal approval behavior.
+
 See [Security](/operations/security) for controls and residual risks.

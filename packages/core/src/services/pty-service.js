@@ -1,5 +1,6 @@
 const os = require('node:os');
 const EventEmitter = require('node:events');
+const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const pty = require('node-pty');
 const { ResourceAllocator } = require('./resource-allocator');
@@ -22,6 +23,7 @@ const TASK_ID_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
 const MAX_ENV_KEYS = 128;
 const MAX_ENV_VALUE_BYTES = 4096;
 const DEFAULT_SESSION_PERSISTENCE_MODE = 'auto';
+const START_FAILURE_DEDUPE_WINDOW_MS = 2000;
 
 const commandExists = (command) => {
   const checker = process.platform === 'win32' ? 'where' : 'which';
@@ -34,6 +36,40 @@ const normalizePersistenceMode = (value) => {
   if (raw === 'off' || raw === 'disabled' || raw === 'none') return 'off';
   if (raw === 'tmux') return 'tmux';
   return 'auto';
+};
+
+const uniqueNonEmpty = (values) => {
+  const seen = new Set();
+  const out = [];
+  for (const value of values) {
+    const normalized = String(value || '').trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+};
+
+const resolveShellCandidates = () => {
+  if (process.platform === 'win32') return ['powershell.exe'];
+  return uniqueNonEmpty([
+    process.env.SHELL,
+    shell,
+    '/bin/zsh',
+    '/bin/bash',
+    '/bin/sh',
+    'zsh',
+    'bash',
+    'sh'
+  ]);
+};
+
+const resolveLaunchCwd = (requestedCwd) => {
+  const candidate = String(requestedCwd || '').trim();
+  if (candidate && fs.existsSync(candidate)) return { cwd: candidate, fallbackApplied: false };
+  const home = String(process.env.HOME || '').trim();
+  if (home && fs.existsSync(home)) return { cwd: home, fallbackApplied: true };
+  return { cwd: process.cwd(), fallbackApplied: true };
 };
 
 const shellQuote = (value) => `'${String(value || '').replace(/'/g, `'\"'\"'`)}'`;
@@ -402,40 +438,73 @@ class PtyService extends EventEmitter {
   startPtyForSession(taskId) {
     const session = this.sessions.get(taskId);
     if (!session) return false;
-
-    let launch;
-    try {
-      launch = resolveSandboxLaunch({
-        shell,
-        cwd: session.cwd || process.env.HOME || process.cwd(),
-        env: session.env
-      });
-    } catch (error) {
+    const { cwd: resolvedCwd, fallbackApplied } = resolveLaunchCwd(session.cwd);
+    if (fallbackApplied && session.cwd !== resolvedCwd) {
+      session.cwd = resolvedCwd;
       this.emit('data', {
         taskId,
-        data: `\r\n[orchestrator] Failed to resolve PTY launch plan: ${error?.message || error}\r\n`
+        data: `\r\n[orchestrator] PTY working directory was unavailable; falling back to ${resolvedCwd}\r\n`
       });
-      return false;
     }
 
-    session.sandbox = launch.sandbox;
-    try {
-      session.ptyProcess = pty.spawn(launch.command, launch.args || [], {
-        name: 'xterm-256color',
-        cols: 80,
-        rows: 30,
-        cwd: session.cwd || process.env.HOME || process.cwd(),
-        env: launch.env || session.env
-      });
-    } catch (error) {
-      session.ptyProcess = null;
+    const shellCandidates = resolveShellCandidates();
+    const errors = [];
+    let launch = null;
+    session.ptyProcess = null;
+
+    for (const shellCandidate of shellCandidates) {
+      try {
+        launch = resolveSandboxLaunch({
+          shell: shellCandidate,
+          cwd: resolvedCwd,
+          env: session.env
+        });
+      } catch (error) {
+        errors.push(`resolve(${shellCandidate}): ${error?.message || error}`);
+        continue;
+      }
+
+      session.sandbox = launch.sandbox;
+      try {
+        session.ptyProcess = pty.spawn(launch.command, launch.args || [], {
+          name: 'xterm-256color',
+          cols: 80,
+          rows: 30,
+          cwd: resolvedCwd,
+          env: launch.env || session.env
+        });
+        break;
+      } catch (error) {
+        session.ptyProcess = null;
+        errors.push(`spawn(${shellCandidate}): ${error?.message || error}`);
+      }
+    }
+
+    if (!session.ptyProcess) {
       session.lastActivityAt = Date.now();
-      this.emit('data', {
-        taskId,
-        data: `\r\n[orchestrator] Failed to start PTY: ${error?.message || error}\r\n`
-      });
+      const failureMessage = errors.length > 0
+        ? `Failed to start PTY: ${errors[errors.length - 1]}`
+        : 'Failed to start PTY: unknown startup error.';
+      const now = Date.now();
+      const previousFailure = session.startFailure || null;
+      const duplicateFailure = previousFailure
+        && previousFailure.message === failureMessage
+        && (now - previousFailure.at) < START_FAILURE_DEDUPE_WINDOW_MS;
+      session.startFailure = {
+        message: failureMessage,
+        at: now,
+        attempts: (previousFailure?.attempts || 0) + 1
+      };
+      if (!duplicateFailure) {
+        this.emit('data', {
+          taskId,
+          data: `\r\n[orchestrator] ${failureMessage}\r\n`
+        });
+      }
       return false;
     }
+
+    session.startFailure = null;
     session.lastActivityAt = Date.now();
     session.exitCode = null;
     session.exitSignal = undefined;
@@ -490,6 +559,7 @@ class PtyService extends EventEmitter {
         tailPreview: this.summarizeTailPreview(session.outputBuffer),
         resource: session.resource || null,
         sandbox: session.sandbox || null,
+        startError: session.startFailure?.message,
         dependencyPolicy: session.dependencyPolicy || null,
         persistence: session.persistence || null
       };
@@ -525,7 +595,13 @@ class PtyService extends EventEmitter {
       if (!existing.ptyProcess) {
         const restarted = this.startPtyForSession(taskId);
         this.emit('state', { taskId, created: false, running: restarted, restarted, subscriberId });
-        return { created: false, running: restarted, restarted, sandbox: existing.sandbox || null };
+        return {
+          created: false,
+          running: restarted,
+          restarted,
+          sandbox: existing.sandbox || null,
+          startError: existing.startFailure?.message
+        };
       }
       this.emit('state', { taskId, created: false, running: true, restarted: false, subscriberId });
       return { created: false, running: true, restarted: false, sandbox: existing.sandbox || null };
@@ -556,6 +632,7 @@ class PtyService extends EventEmitter {
       }),
       modeSnapshot: null,
       hiddenCommandEcho: null,
+      startFailure: null,
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       exitCode: null,
@@ -575,7 +652,13 @@ class PtyService extends EventEmitter {
     this.ensureModeMachine(session, sanitizedEnv);
     const started = this.startPtyForSession(taskId);
     this.emit('state', { taskId, created: true, running: started, restarted: false, subscriberId });
-    return { created: true, running: started, restarted: false, sandbox: session.sandbox || null };
+    return {
+      created: true,
+      running: started,
+      restarted: false,
+      sandbox: session.sandbox || null,
+      startError: session.startFailure?.message
+    };
   }
 
   attach(taskId, subscriberId = 'default') {
@@ -596,7 +679,8 @@ class PtyService extends EventEmitter {
       running: !!session.ptyProcess,
       exitCode: session.exitCode,
       signal: session.exitSignal,
-      sandbox: session.sandbox || null
+      sandbox: session.sandbox || null,
+      startError: session.startFailure?.message
     };
   }
 
@@ -711,10 +795,17 @@ class PtyService extends EventEmitter {
     session.isBlocked = false;
     session.blockedReason = undefined;
     session.hiddenCommandEcho = null;
+    session.startFailure = null;
 
     const restarted = this.startPtyForSession(taskId);
     this.emit('state', { taskId, created: false, running: restarted, restarted: true, subscriberId });
-    return { success: true, running: restarted, restarted: true, sandbox: session.sandbox || null };
+    return {
+      success: true,
+      running: restarted,
+      restarted: true,
+      sandbox: session.sandbox || null,
+      startError: session.startFailure?.message
+    };
   }
 
   destroy(taskId) {

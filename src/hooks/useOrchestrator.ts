@@ -13,6 +13,7 @@ import type {
   LivingSpecPreference,
   LivingSpecSelectionPrompt,
   PendingApprovalRequest,
+  ProjectCollisionSummary,
   ProjectPermissionPolicy,
   SourceStatus,
   TaskStatus,
@@ -38,6 +39,7 @@ interface CreateTaskInput {
   rawTaskName: string;
   agentCommand: string;
   prompt: string;
+  permissionMode?: 'default' | 'bypass';
   launchCommandOverride?: string;
   baseBranch?: string;
   createBaseBranchIfMissing?: boolean;
@@ -435,6 +437,7 @@ const sanitizeTaskTabs = (value: unknown, basePathFallback: string, defaultComma
       displayName: displayName && displayName !== name ? displayName : undefined,
       tags: tags.length > 0 ? tags : undefined,
       agent,
+      permissionMode: tab.permissionMode === 'bypass' ? 'bypass' : 'default',
       basePath,
       worktreePath: typeof tab.worktreePath === 'string' && tab.worktreePath.trim() ? tab.worktreePath : undefined,
       parentBranch: typeof tab.parentBranch === 'string' && tab.parentBranch.trim() ? tab.parentBranch.trim() : undefined,
@@ -487,7 +490,8 @@ export const useOrchestrator = () => {
   const [taskStatuses, setTaskStatuses] = useState<Record<string, TaskStatus>>({});
   const [taskTodos, setTaskTodos] = useState<Record<string, AgentTodo[]>>({});
   const [taskUsage, setTaskUsage] = useState<Record<string, TaskUsage>>({});
-  const [collisions, setCollisions] = useState<string[]>([]);
+  const [collisionsByProject, setCollisionsByProject] = useState<Record<string, ProjectCollisionSummary>>({});
+  const [statusPollRevision, setStatusPollRevision] = useState(0);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApprovalQueueItem[]>([]);
   const [attentionEvents, setAttentionEvents] = useState<AttentionEvent[]>([]);
   const [projectPermissions, setProjectPermissions] = useState<Record<string, ProjectPermissionPolicy>>({});
@@ -865,6 +869,7 @@ export const useOrchestrator = () => {
     agentCommand,
     prompt,
     launchCommandOverride,
+    permissionMode,
     baseBranch,
     createBaseBranchIfMissing,
     dependencyCloneMode: taskDependencyCloneMode,
@@ -888,6 +893,7 @@ export const useOrchestrator = () => {
       id,
       name: taskName,
       agent: agentCommand,
+      permissionMode: permissionMode === 'bypass' ? 'bypass' : 'default',
       basePath,
       parentBranch: selectedParentBranch,
       parentTaskId,
@@ -1230,6 +1236,7 @@ export const useOrchestrator = () => {
       id: buildRestoredTaskId(),
       name: (branchName && branchName.trim()) ? branchName.trim() : inferWorktreeName(normalizedWorktreePath),
       agent: defaultCommand,
+      permissionMode: 'default',
       basePath: normalizedProjectPath,
       worktreePath: normalizedWorktreePath,
       capabilities: { autoMerge: false },
@@ -1452,6 +1459,7 @@ export const useOrchestrator = () => {
               id: `restored-${now}-${restoredCount}`,
               name: fallbackName,
               agent: resolvedDefaultCommand,
+              permissionMode: 'default',
               basePath: projectPath,
               worktreePath: normalizedWorktreePath,
               capabilities: { autoMerge: false },
@@ -1897,7 +1905,7 @@ export const useOrchestrator = () => {
       try {
         const currentTabs = tabsRef.current;
         if (currentTabs.length === 0) {
-          setCollisions([]);
+          setCollisionsByProject({});
           setTaskStatuses({});
           return;
         }
@@ -1918,31 +1926,44 @@ export const useOrchestrator = () => {
           }
         }
 
-        const allFiles = new Map<string, string[]>();
-        for (const [tabId, files] of Object.entries(modifiedFilesMap)) {
-          for (const file of files) {
-            const existing = allFiles.get(file) || [];
-            existing.push(tabId);
-            allFiles.set(file, existing);
-          }
-        }
-
-        const collidingFiles: string[] = [];
         const newCollisionState: Record<string, boolean> = {};
         const newDirtyState: Record<string, boolean> = {};
         const tabById = new Map(currentTabs.map((tab) => [tab.id, tab]));
-
-        for (const [file, tabIds] of allFiles.entries()) {
-          if (tabIds.length > 1) {
-            collidingFiles.push(file);
-            tabIds.forEach(id => {
-              newCollisionState[id] = true;
-            });
-          }
-        }
+        const projectFileOwners = new Map<string, Map<string, string[]>>();
 
         for (const tabId of Object.keys(modifiedFilesMap)) {
           newDirtyState[tabId] = modifiedFilesMap[tabId].length > 0;
+          const tab = tabById.get(tabId);
+          if (!tab) continue;
+          const projectKey = normalizeProjectPath(tab.basePath);
+          if (!projectKey) continue;
+          const filesForProject = projectFileOwners.get(projectKey) || new Map<string, string[]>();
+          for (const file of modifiedFilesMap[tabId]) {
+            const owners = filesForProject.get(file) || [];
+            owners.push(tabId);
+            filesForProject.set(file, owners);
+          }
+          projectFileOwners.set(projectKey, filesForProject);
+        }
+
+        const nextCollisionsByProject: Record<string, ProjectCollisionSummary> = {};
+        for (const [projectKey, filesForProject] of projectFileOwners.entries()) {
+          const projectCollisionFiles: string[] = [];
+          const projectCollisionTasks = new Set<string>();
+          for (const [file, owners] of filesForProject.entries()) {
+            if (owners.length <= 1) continue;
+            projectCollisionFiles.push(file);
+            owners.forEach((taskId) => {
+              newCollisionState[taskId] = true;
+              projectCollisionTasks.add(taskId);
+            });
+          }
+          if (projectCollisionFiles.length > 0) {
+            nextCollisionsByProject[projectKey] = {
+              files: Array.from(new Set(projectCollisionFiles)).sort((a, b) => a.localeCompare(b)),
+              taskIds: Array.from(projectCollisionTasks).sort((a, b) => a.localeCompare(b))
+            };
+          }
         }
 
         // Cross-worktree context leakage: high-impact changes in one task can break siblings.
@@ -2007,7 +2028,7 @@ export const useOrchestrator = () => {
           }
         }
 
-        setCollisions(collidingFiles);
+        setCollisionsByProject(nextCollisionsByProject);
         setTaskStatuses(prev => {
           const next: Record<string, TaskStatus> = {};
           currentTabs.forEach(tab => {
@@ -2035,7 +2056,11 @@ export const useOrchestrator = () => {
       cancelled = true;
       clearInterval(intervalId);
     };
-  }, [pushAttentionEvent]);
+  }, [pushAttentionEvent, statusPollRevision]);
+
+  const refreshTaskStatuses = useCallback(() => {
+    setStatusPollRevision((prev) => prev + 1);
+  }, []);
 
   const blockedTasks = tabs
     .filter((tab) => !!taskStatuses[tab.id]?.isBlocked)
@@ -2067,7 +2092,7 @@ export const useOrchestrator = () => {
       taskStatuses,
       taskTodos,
       taskUsage,
-      collisions,
+      collisionsByProject,
       pendingApproval,
       pendingApprovals,
       pendingApprovalCount: pendingApprovals.length,
@@ -2118,6 +2143,7 @@ export const useOrchestrator = () => {
       respondToAllBlockedTasks,
       approvePendingRequest,
       rejectPendingRequest,
+      refreshTaskStatuses,
       validatePath
     }
   };

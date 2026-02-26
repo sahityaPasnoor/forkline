@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { X, Play } from 'lucide-react';
+import { applyAgentPermissionMode, supportsAgentPermissionBypass, type AgentPermissionMode } from '../lib/agentProfiles';
 
 interface NewTaskModalProps {
   isOpen: boolean;
@@ -13,15 +14,14 @@ interface NewTaskModalProps {
     options?: {
       createBaseBranchIfMissing?: boolean;
       dependencyCloneMode?: 'copy_on_write' | 'full_copy';
-      livingSpecOverridePath?: string;
       launchCommandOverride?: string;
+      permissionMode?: 'default' | 'bypass';
     }
-  ) => void;
+  ) => Promise<{ success: boolean; error?: string }>;
   projectName: string;
   basePath: string;
   parentBranch: string;
   availableBranches: string[];
-  livingSpecCandidates: Array<{ path: string; kind: string }>;
   dependencyCloneMode: 'copy_on_write' | 'full_copy';
   defaultCommand: string;
   availableAgents: {name: string, command: string, version: string}[];
@@ -104,8 +104,8 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
   const [newParentBranch, setNewParentBranch] = useState('');
   const [parentBranchError, setParentBranchError] = useState('');
   const [selectedDependencyCloneMode, setSelectedDependencyCloneMode] = useState<'copy_on_write' | 'full_copy'>(dependencyCloneMode);
-  const [livingSpecOverridePath, setLivingSpecOverridePath] = useState('');
   const [launchMode, setLaunchMode] = useState<LaunchMode>('new');
+  const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>('default');
   const [resumeProvider, setResumeProvider] = useState<ResumeProvider>(resolveResumeProvider(defaultCommand));
   const [resumeChoice, setResumeChoice] = useState<ResumeChoice>('latest');
   const [sessionOptions, setSessionOptions] = useState<AgentSessionOption[]>([]);
@@ -117,6 +117,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
   const [prompt, setPrompt] = useState('');
   const [autoMerge, setAutoMerge] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const [formError, setFormError] = useState('');
 
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
@@ -131,8 +132,8 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
       setNewParentBranch('');
       setParentBranchError('');
       setSelectedDependencyCloneMode(dependencyCloneMode);
-      setLivingSpecOverridePath('');
       setLaunchMode('new');
+      setPermissionMode('default');
       setResumeProvider(resolveResumeProvider(validCommand));
       setResumeChoice('latest');
       setSessionOptions([]);
@@ -142,6 +143,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
       setSessionsLoading(false);
       setSessionError('');
       setIsStarting(false);
+      setFormError('');
     }
     wasOpenRef.current = isOpen;
   }, [isOpen, projectName, defaultCommand, availableAgents, parentBranch, availableBranches, dependencyCloneMode]);
@@ -197,6 +199,32 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
     };
   }, [isOpen, launchMode, command, basePath]);
 
+  const supportsPermissionBypass = useMemo(
+    () => supportsAgentPermissionBypass(command),
+    [command]
+  );
+  const selectedSession = useMemo(
+    () => sessionOptions.find((session) => session.id === selectedSessionId) || null,
+    [sessionOptions, selectedSessionId]
+  );
+  const resumeSelectionValid = useMemo(() => {
+    if (launchMode !== 'resume') return true;
+    if (resumeProvider === 'other') return false;
+    if (supportsInAppList) {
+      if (resumeChoice === 'session') return !!selectedSession;
+      return true;
+    }
+    if (resumeChoice === 'manual') return !!manualSessionId.trim();
+    return true;
+  }, [launchMode, resumeProvider, supportsInAppList, resumeChoice, selectedSession, manualSessionId]);
+  const canSpawn = !!taskName.trim() && !isStarting && !sessionsLoading && !parentBranchError && resumeSelectionValid;
+  const bypassEnabled = permissionMode === 'bypass' && supportsPermissionBypass;
+
+  useEffect(() => {
+    if (supportsPermissionBypass) return;
+    setPermissionMode('default');
+  }, [supportsPermissionBypass]);
+
   if (!isOpen) return null;
 
   const startSession = (selectedCommand: string) => {
@@ -215,26 +243,39 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
     }
     setParentBranchError('');
 
+    const effectivePermissionMode: AgentPermissionMode = (
+      permissionMode === 'bypass' && supportsPermissionBypass
+    ) ? 'bypass' : 'default';
+
+    setFormError('');
     let launchCommandOverride: string | undefined;
     if (launchMode === 'resume') {
-      const selectedSession = sessionOptions.find((session) => session.id === selectedSessionId) || null;
       const resumeCommand = buildResumeCommand(resumeProvider, resumeChoice, selectedSession, manualSessionId);
       if (!resumeCommand) {
-        setSessionError('Select a valid session resume target.');
+        setFormError('Select a valid resume target for this provider.');
         return;
       }
-      launchCommandOverride = resumeCommand;
+      launchCommandOverride = applyAgentPermissionMode(resumeCommand, effectivePermissionMode);
     }
 
     setIsStarting(true);
-    onSubmit(taskName, selectedCommand, launchMode === 'resume' ? '' : prompt, selectedParentBranch, { autoMerge }, {
+    void onSubmit(taskName, selectedCommand, launchMode === 'resume' ? '' : prompt, selectedParentBranch, { autoMerge }, {
       createBaseBranchIfMissing: parentBranchMode === 'new',
       dependencyCloneMode: selectedDependencyCloneMode,
-      livingSpecOverridePath: livingSpecOverridePath || undefined,
-      launchCommandOverride
+      launchCommandOverride,
+      permissionMode: effectivePermissionMode
+    }).then((result) => {
+      if (!result.success) {
+        setIsStarting(false);
+        setFormError(result.error || 'Unable to spawn session.');
+        return;
+      }
+      setPrompt('');
+      onClose();
+    }).catch((error: unknown) => {
+      setIsStarting(false);
+      setFormError(error instanceof Error ? error.message : 'Unable to spawn session.');
     });
-    setPrompt('');
-    onClose();
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -256,10 +297,10 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
           <button onClick={onClose} className="btn-ghost btn-icon rounded-md"><X size={18} /></button>
         </div>
         
-        <form onSubmit={handleSubmit} className="p-6 space-y-5 bg-[#000000] overflow-y-auto">
+        <form onSubmit={handleSubmit} className="p-5 space-y-4 bg-[#000000] overflow-y-auto">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="sm:col-span-2">
-              <label className="block text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Task Branch</label>
+              <label className="block text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Branch</label>
               <input 
                 type="text" 
                 value={taskName}
@@ -413,16 +454,46 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                     )}
                   </>
                 )}
-                <div className="text-[10px] text-[#9ca3af] font-mono">
-                  Resume selections are ephemeral. Forkline does not store provider session catalogs or aliases.
-                </div>
               </div>
             )}
+            <div
+              className={`rounded border px-3 py-2.5 space-y-2 ${
+                bypassEnabled
+                  ? 'border-[#60a5fa] bg-[#0a1730]'
+                  : 'border-[#334155] bg-[#06101f]'
+              }`}
+            >
+              <div className="text-[10px] uppercase tracking-[0.14em] text-[#93c5fd] font-mono">Permissions</div>
+              <label className={`flex items-center space-x-3 ${supportsPermissionBypass ? 'cursor-pointer group' : 'opacity-60 cursor-not-allowed'}`}>
+                <input
+                  id="spawn-bypass-approvals"
+                  type="checkbox"
+                  checked={permissionMode === 'bypass'}
+                  disabled={!supportsPermissionBypass}
+                  onChange={(e) => setPermissionMode(e.target.checked ? 'bypass' : 'default')}
+                  className="h-4 w-4 accent-[#60a5fa] border border-[#1d4ed8] bg-[#0a0f1a] rounded-sm disabled:opacity-40"
+                />
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-[#bfdbfe] group-hover:text-white transition-colors">Bypass approval prompts</span>
+                  <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                    bypassEnabled
+                      ? 'text-[#bfdbfe] border-[#60a5fa] bg-[#10213f]'
+                      : 'text-[#93c5fd] border-[#334155] bg-[#09172d]'
+                  }`}>
+                    {bypassEnabled ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+              </label>
+              <div className="text-[10px] text-[#93c5fd] font-mono">
+                {supportsPermissionBypass
+                  ? 'Supported by this agent.'
+                  : 'Not supported by this agent.'}
+              </div>
+            </div>
           </div>
 
           <div className="rounded-lg border border-[#1f1f1f] bg-[#070707] p-3 space-y-3">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-[#737373] font-mono">Execution Preview</div>
-            <div className="text-[11px] text-[#d4d4d8] font-mono">Creates a task branch and a dedicated git worktree.</div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-[#737373] font-mono">Workspace Setup</div>
             <div>
               <label className="block text-[10px] font-bold text-[#737373] uppercase tracking-[0.2em] mb-1">Parent Branch</label>
               <div className="flex items-center gap-2 mb-2">
@@ -480,7 +551,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
               )}
               {parentBranchMode === 'new' && (
                 <div className="text-[10px] text-[#9ca3af] font-mono mt-1">
-                  Forkline will create <span className="text-white">{selectedParentBranch || '<new-parent-branch>'}</span> in the base repo before spawning this task branch.
+                  Creates <span className="text-white">{selectedParentBranch || '<new-parent-branch>'}</span> in base repo before spawn.
                 </div>
               )}
               {parentBranchError && (
@@ -488,10 +559,10 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
               )}
             </div>
             <div className="text-[11px] text-[#a3a3a3] font-mono truncate" title={worktreePreviewPath}>
-              Worktree path: <span className="text-white">{worktreePreviewPath}</span>
+              Worktree: <span className="text-white">{worktreePreviewPath}</span>
             </div>
             <div>
-              <label className="block text-[10px] font-bold text-[#737373] uppercase tracking-[0.2em] mb-1">Dependencies For This Task</label>
+              <label className="block text-[10px] font-bold text-[#737373] uppercase tracking-[0.2em] mb-1">Dependencies</label>
               <select
                 value={selectedDependencyCloneMode}
                 onChange={(e) => setSelectedDependencyCloneMode(e.target.value === 'full_copy' ? 'full_copy' : 'copy_on_write')}
@@ -505,42 +576,36 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
           </div>
 
           <div>
-            <label className="block text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Instructions</label>
+            <label className="block text-[10px] font-bold text-[#525252] uppercase tracking-[0.2em] mb-2">Initial Instruction</label>
             <textarea 
               value={prompt}
               onChange={e => setPrompt(e.target.value)}
-              placeholder={launchMode === 'resume' ? 'Ignored for resume mode. Add instructions after the session opens.' : 'e.g. Refactor the auth component...'}
+              placeholder={launchMode === 'resume' ? 'Resume mode: add instructions in terminal after attach.' : 'e.g. Refactor auth component'}
               className="w-full h-24 input-stealth rounded p-3 text-xs"
               disabled={launchMode === 'resume'}
             />
-            {launchMode === 'resume' && (
-              <div className="mt-1 text-[10px] text-[#9ca3af] font-mono">
-                Resume mode opens an existing provider session. Enter follow-up instructions inside the terminal after attach.
-              </div>
-            )}
           </div>
 
-          <details className="border-t border-[#1a1a1a] pt-4">
-            <summary className="text-[11px] uppercase tracking-[0.16em] text-[#9ca3af] font-mono cursor-pointer">
-              Advanced
-            </summary>
-            <label className="mt-3 flex items-center space-x-3 cursor-pointer group">
-              <input
-                type="checkbox"
-                checked={autoMerge}
-                onChange={e => setAutoMerge(e.target.checked)}
-                className="appearance-none w-4 h-4 rounded-sm border border-[#262626] bg-[#0a0a0a] checked:bg-white checked:border-white transition-colors"
-              />
-              <div>
-                <span className="text-xs font-medium text-[#a3a3a3] group-hover:text-white transition-colors">Allow auto-merge for this task</span>
-              </div>
-            </label>
-          </details>
+          <label className="flex items-center space-x-3 cursor-pointer group border-t border-[#1a1a1a] pt-3">
+            <input
+              type="checkbox"
+              checked={autoMerge}
+              onChange={e => setAutoMerge(e.target.checked)}
+              className="appearance-none w-4 h-4 rounded-sm border border-[#262626] bg-[#0a0a0a] checked:bg-white checked:border-white transition-colors"
+            />
+            <span className="text-xs font-medium text-[#a3a3a3] group-hover:text-white transition-colors">Allow auto-merge for this task</span>
+          </label>
+
+          {formError && (
+            <div className="text-[11px] text-rose-300 font-mono">
+              {formError}
+            </div>
+          )}
 
           <div className="pt-2 flex justify-end space-x-3">
             <button type="button" onClick={onClose} className="btn-ghost px-4 py-2 text-xs font-bold rounded">Cancel</button>
-            <button type="submit" disabled={isStarting} className="btn-primary px-5 py-2 rounded text-xs uppercase tracking-wider disabled:opacity-60">
-              <Play size={14} className="mr-2" /> Spawn
+            <button type="submit" disabled={!canSpawn} className="btn-primary px-5 py-2 rounded text-xs uppercase tracking-wider disabled:opacity-60">
+              <Play size={14} className="mr-2" /> {isStarting ? 'Spawning...' : 'Spawn'}
             </button>
           </div>
         </form>
