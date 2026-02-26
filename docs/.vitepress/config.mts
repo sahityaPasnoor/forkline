@@ -22,6 +22,7 @@ export default {
     nav: [
       { text: 'Getting Started', link: '/guide/getting-started' },
       { text: 'How To Use', link: '/guide/how-to-use' },
+      { text: 'Project Dossier', link: '/guide/project-dossier' },
       { text: 'Architecture', link: '/architecture/overview' },
       { text: 'Core API', link: '/reference/core-api' }
     ],
@@ -31,7 +32,8 @@ export default {
           text: 'Guide',
           items: [
             { text: 'Getting Started', link: '/guide/getting-started' },
-            { text: 'How To Use', link: '/guide/how-to-use' }
+            { text: 'How To Use', link: '/guide/how-to-use' },
+            { text: 'Project Dossier', link: '/guide/project-dossier' }
           ]
         }
       ],
