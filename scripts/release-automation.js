@@ -123,8 +123,7 @@ const run = (command, commandArgs, runOptions = {}) => {
 const runCapture = (command, commandArgs) => {
   const rendered = [command, ...commandArgs].join(' ');
   if (options.dryRun) {
-    info(`(dry-run) ${rendered}`);
-    return '';
+    info(`(dry-run validate) ${rendered}`);
   }
   const result = spawnSync(command, commandArgs, {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -164,6 +163,10 @@ const ensureSigningIdentity = () => {
 const main = () => {
   ensureCleanTree();
 
+  if (options.signMac) {
+    ensureSigningIdentity();
+  }
+
   run('git', ['checkout', 'main']);
   run('git', ['pull', '--ff-only', 'origin', 'main']);
 
@@ -192,15 +195,14 @@ const main = () => {
     run('npx', ['playwright', 'test', 'e2e/electron.smoke.spec.js']);
   }
 
-  if (options.signMac) {
-    ensureSigningIdentity();
+  if (options.version) {
+    if (!options.pushTags) {
+      info('WARN: --version creates a local git tag. Use --push-tags to publish it.');
+    }
+    run('npm', ['version', options.version]);
   }
 
   run('npm', ['run', 'dist:local']);
-
-  if (options.version) {
-    run('npm', ['version', options.version]);
-  }
 
   if (options.pushMain) {
     run('git', ['push', 'origin', 'main']);
