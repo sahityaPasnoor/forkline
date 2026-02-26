@@ -3,9 +3,116 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const pty = require('node-pty');
 
 const { PtyService } = require('../src/services/pty-service');
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const createFakePtyProcess = (options = {}) => {
+  const emitScriptEcho = options.emitScriptEcho === true;
+  let onData = null;
+  let onExit = null;
+  return {
+    onData(handler) {
+      onData = handler;
+    },
+    onExit(handler) {
+      onExit = handler;
+    },
+    write(payload) {
+      if (typeof onData === 'function' && typeof payload === 'string') {
+        const normalized = payload.replace(/\r/g, '').trim();
+        if (!normalized) return;
+        if (normalized.includes('echo "forkline"')) {
+          onData('forkline\r\n');
+          return;
+        }
+        if (normalized.includes('printf "RESTART_LAUNCH_OK\\n"')) {
+          onData('RESTART_LAUNCH_OK\r\n');
+          return;
+        }
+        if (emitScriptEcho && normalized.includes('./.agent_cache/launch_agent.sh')) {
+          onData(`${normalized}\r\nAGENT_SCRIPT_OK\r\n`);
+        }
+      }
+    },
+    resize() {},
+    kill() {
+      if (typeof onExit === 'function') {
+        onExit({ exitCode: 0, signal: 0 });
+      }
+    }
+  };
+};
+
+const withMockedSpawn = async (spawnImpl, callback) => {
+  const originalSpawn = pty.spawn;
+  pty.spawn = spawnImpl;
+  try {
+    return await callback();
+  } finally {
+    pty.spawn = originalSpawn;
+  }
+};
+
+test('PtyService reports startup failure details and dedupes noisy repeat errors', () => {
+  const originalSpawn = pty.spawn;
+  const dataEvents = [];
+  pty.spawn = () => {
+    throw new Error('posix_spawnp failed.');
+  };
+
+  const service = new PtyService({ maxSessions: 1, sessionPersistenceMode: 'off' });
+  service.on('data', ({ data }) => dataEvents.push(data));
+
+  try {
+    const first = service.createSession('task-start-failure', process.cwd(), {}, 'test');
+    assert.equal(first.created, true);
+    assert.equal(first.running, false);
+    assert.match(first.startError || '', /Failed to start PTY/i);
+
+    const second = service.createSession('task-start-failure', process.cwd(), {}, 'test');
+    assert.equal(second.created, false);
+    assert.equal(second.running, false);
+    assert.match(second.startError || '', /Failed to start PTY/i);
+
+    const startupFailures = dataEvents.filter((entry) => /Failed to start PTY/i.test(entry));
+    assert.equal(startupFailures.length, 1);
+
+    const attached = service.attach('task-start-failure', 'test');
+    assert.ok(attached);
+    assert.match(attached.startError || '', /Failed to start PTY/i);
+  } finally {
+    pty.spawn = originalSpawn;
+    service.destroy('task-start-failure');
+  }
+});
+
+test('PtyService falls back across shell candidates before failing startup', () => {
+  const originalSpawn = pty.spawn;
+  const attemptedCommands = [];
+  pty.spawn = (command, args, options) => {
+    attemptedCommands.push(String(command));
+    if (command !== '/bin/sh') {
+      throw new Error('posix_spawnp failed.');
+    }
+    return createFakePtyProcess(args, options);
+  };
+
+  const service = new PtyService({ maxSessions: 1, sessionPersistenceMode: 'off' });
+
+  try {
+    const created = service.createSession('task-shell-fallback', process.cwd(), {}, 'test');
+    assert.equal(created.created, true);
+    assert.equal(created.running, true);
+    assert.equal(created.startError, undefined);
+    assert.ok(attemptedCommands.length >= 2);
+    assert.ok(attemptedCommands.includes('/bin/sh'));
+  } finally {
+    pty.spawn = originalSpawn;
+    service.destroy('task-shell-fallback');
+  }
+});
 
 test('PtyService validates task ids and enforces session cap', () => {
   const service = new PtyService({ maxSessions: 1, sessionPersistenceMode: 'off' });
@@ -28,141 +135,149 @@ test('PtyService validates task ids and enforces session cap', () => {
 test('PtyService supports lifecycle operations', () => {
   const service = new PtyService({ maxSessions: 2, sessionPersistenceMode: 'off' });
 
-  try {
-    const created = service.createSession('task-lifecycle', process.cwd(), {}, 'test');
-    assert.equal(created.created, true);
+  return withMockedSpawn(() => createFakePtyProcess(), async () => {
+    try {
+      const created = service.createSession('task-lifecycle', process.cwd(), {}, 'test');
+      assert.equal(created.created, true);
 
-    const attached = service.attach('task-lifecycle', 'test');
-    assert.ok(attached);
-    assert.equal(attached.taskId, 'task-lifecycle');
-    assert.ok(attached.sandbox);
-    assert.equal(attached.sandbox.mode, 'off');
+      const attached = service.attach('task-lifecycle', 'test');
+      assert.ok(attached);
+      assert.equal(attached.taskId, 'task-lifecycle');
+      assert.ok(attached.sandbox);
+      assert.equal(attached.sandbox.mode, 'off');
 
-    const writeRes = service.write('task-lifecycle', 'echo "forkline"\r');
-    assert.equal(writeRes.success, true);
+      const writeRes = service.write('task-lifecycle', 'echo "forkline"\r');
+      assert.equal(writeRes.success, true);
 
-    const resizeRes = service.resize('task-lifecycle', 100, 30);
-    assert.equal(resizeRes.success, true);
+      const resizeRes = service.resize('task-lifecycle', 100, 30);
+      assert.equal(resizeRes.success, true);
 
-    const restartRes = service.restart('task-lifecycle', 'test');
-    assert.equal(restartRes.success, true);
-    assert.equal(restartRes.restarted, true);
+      const restartRes = service.restart('task-lifecycle', 'test');
+      assert.equal(restartRes.success, true);
+      assert.equal(restartRes.restarted, true);
 
-    const list = service.listSessions();
-    assert.equal(list.length, 1);
-    assert.equal(list[0].taskId, 'task-lifecycle');
+      const list = service.listSessions();
+      assert.equal(list.length, 1);
+      assert.equal(list[0].taskId, 'task-lifecycle');
 
-    const destroyRes = service.destroy('task-lifecycle');
-    assert.equal(destroyRes.success, true);
-  } finally {
-    service.destroy('task-lifecycle');
-  }
+      const destroyRes = service.destroy('task-lifecycle');
+      assert.equal(destroyRes.success, true);
+    } finally {
+      service.destroy('task-lifecycle');
+    }
+  });
 });
 
 test('PtyService drops immediate duplicate full-line writes', () => {
   const service = new PtyService({ maxSessions: 1, sessionPersistenceMode: 'off' });
   const originalNow = Date.now;
 
-  try {
-    const created = service.createSession('task-dedupe', process.cwd(), {}, 'test');
-    assert.equal(created.created, true);
+  return withMockedSpawn(() => createFakePtyProcess(), async () => {
+    try {
+      const created = service.createSession('task-dedupe', process.cwd(), {}, 'test');
+      assert.equal(created.created, true);
 
-    const session = service.sessions.get('task-dedupe');
-    assert.ok(session?.ptyProcess, 'expected PTY process for dedupe test');
+      const session = service.sessions.get('task-dedupe');
+      assert.ok(session?.ptyProcess, 'expected PTY process for dedupe test');
 
-    const writes = [];
-    const originalWrite = session.ptyProcess.write.bind(session.ptyProcess);
-    session.ptyProcess.write = (payload) => {
-      writes.push(payload);
-      return originalWrite(payload);
-    };
+      const writes = [];
+      const originalWrite = session.ptyProcess.write.bind(session.ptyProcess);
+      session.ptyProcess.write = (payload) => {
+        writes.push(payload);
+        return originalWrite(payload);
+      };
 
-    let now = 1_000;
-    Date.now = () => now;
+      let now = 1_000;
+      Date.now = () => now;
 
-    const first = service.write('task-dedupe', 'pwd\r');
-    assert.equal(first.success, true);
-    assert.equal(first.deduped, undefined);
+      const first = service.write('task-dedupe', 'pwd\r');
+      assert.equal(first.success, true);
+      assert.equal(first.deduped, undefined);
 
-    now += 20;
-    const duplicate = service.write('task-dedupe', 'pwd\r');
-    assert.equal(duplicate.success, true);
-    assert.equal(duplicate.deduped, true);
+      now += 20;
+      const duplicate = service.write('task-dedupe', 'pwd\r');
+      assert.equal(duplicate.success, true);
+      assert.equal(duplicate.deduped, true);
 
-    now += 200;
-    const later = service.write('task-dedupe', 'pwd\r');
-    assert.equal(later.success, true);
-    assert.equal(later.deduped, undefined);
+      now += 200;
+      const later = service.write('task-dedupe', 'pwd\r');
+      assert.equal(later.success, true);
+      assert.equal(later.deduped, undefined);
 
-    assert.equal(writes.filter((payload) => payload === 'pwd\r').length, 2);
-  } finally {
-    Date.now = originalNow;
-    service.destroy('task-dedupe');
-  }
+      assert.equal(writes.filter((payload) => payload === 'pwd\r').length, 2);
+    } finally {
+      Date.now = originalNow;
+      service.destroy('task-dedupe');
+    }
+  });
 });
 
 test('PtyService launch writes command and tracks hidden echo suppression', () => {
   const service = new PtyService({ maxSessions: 1, sessionPersistenceMode: 'off' });
 
-  try {
-    const created = service.createSession('task-launch', process.cwd(), {}, 'test');
-    assert.equal(created.created, true);
+  return withMockedSpawn(() => createFakePtyProcess({ emitScriptEcho: false }), async () => {
+    try {
+      const created = service.createSession('task-launch', process.cwd(), {}, 'test');
+      assert.equal(created.created, true);
 
-    const session = service.sessions.get('task-launch');
-    assert.ok(session?.ptyProcess, 'expected PTY process for launch test');
+      const session = service.sessions.get('task-launch');
+      assert.ok(session?.ptyProcess, 'expected PTY process for launch test');
 
-    const writes = [];
-    const originalWrite = session.ptyProcess.write.bind(session.ptyProcess);
-    session.ptyProcess.write = (payload) => {
-      writes.push(payload);
-      return originalWrite(payload);
-    };
+      const writes = [];
+      const originalWrite = session.ptyProcess.write.bind(session.ptyProcess);
+      session.ptyProcess.write = (payload) => {
+        writes.push(payload);
+        return originalWrite(payload);
+      };
 
-    const launchResult = service.launch('task-launch', './.agent_cache/launch_agent.sh', { suppressEcho: true });
-    assert.equal(launchResult.success, true);
-    assert.equal(writes[writes.length - 1], './.agent_cache/launch_agent.sh\r');
-    assert.ok(session.hiddenCommandEcho, 'expected hidden command echo tracker');
-  } finally {
-    service.destroy('task-launch');
-  }
+      const launchResult = service.launch('task-launch', './.agent_cache/launch_agent.sh', { suppressEcho: true });
+      assert.equal(launchResult.success, true);
+      assert.equal(writes[writes.length - 1], './.agent_cache/launch_agent.sh\r');
+      assert.ok(session.hiddenCommandEcho, 'expected hidden command echo tracker');
+    } finally {
+      service.destroy('task-launch');
+    }
+  });
 });
 
 test('PtyService launch restarts PTY when session exists but process is not running', async () => {
   const service = new PtyService({ maxSessions: 1, sessionPersistenceMode: 'off' });
 
-  try {
-    const created = service.createSession('task-launch-restart', process.cwd(), {}, 'test');
-    assert.equal(created.created, true);
-    const session = service.sessions.get('task-launch-restart');
-    assert.ok(session?.ptyProcess, 'expected PTY process for restart launch test');
+  return withMockedSpawn(() => createFakePtyProcess(), async () => {
+    try {
+      const created = service.createSession('task-launch-restart', process.cwd(), {}, 'test');
+      assert.equal(created.created, true);
+      const session = service.sessions.get('task-launch-restart');
+      assert.ok(session?.ptyProcess, 'expected PTY process for restart launch test');
 
-    let output = '';
-    service.on('data', ({ taskId, data }) => {
-      if (taskId !== 'task-launch-restart') return;
-      output += data;
-    });
+      let output = '';
+      service.on('data', ({ taskId, data }) => {
+        if (taskId !== 'task-launch-restart') return;
+        output += data;
+      });
 
-    session.ptyProcess.kill();
-    const waitUntil = async (predicate, timeoutMs = 2400, intervalMs = 40) => {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        if (predicate()) return true;
-        await wait(intervalMs);
-      }
-      return predicate();
-    };
-    const stopped = await waitUntil(() => !session.ptyProcess);
-    assert.equal(stopped, true);
+      session.ptyProcess.kill();
+      const waitUntil = async (predicate, timeoutMs = 2400, intervalMs = 40) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          if (predicate()) return true;
+          await wait(intervalMs);
+        }
+        return predicate();
+      };
+      const stopped = await waitUntil(() => !session.ptyProcess);
+      assert.equal(stopped, true);
 
-    const launchResult = service.launch('task-launch-restart', 'printf "RESTART_LAUNCH_OK\\n"', { suppressEcho: true });
-    assert.equal(launchResult.success, true);
+      const launchResult = service.launch('task-launch-restart', 'printf "RESTART_LAUNCH_OK\\n"', { suppressEcho: true });
+      assert.equal(launchResult.success, true);
 
-    await wait(1200);
-    assert.equal(output.includes('RESTART_LAUNCH_OK'), true);
-    assert.equal(output.includes('printf "RESTART_LAUNCH_OK'), false);
-  } finally {
-    service.destroy('task-launch-restart');
-  }
+      await wait(120);
+      assert.equal(output.includes('RESTART_LAUNCH_OK'), true);
+      assert.equal(output.includes('printf "RESTART_LAUNCH_OK'), false);
+    } finally {
+      service.destroy('task-launch-restart');
+    }
+  });
 });
 
 test('PtyService hidden echo filter removes wrapped launch command from long startup chunk', () => {
@@ -249,31 +364,33 @@ test('PtyService launch suppresses relaunch script echo in live PTY flow', async
   const service = new PtyService({ maxSessions: 1, sessionPersistenceMode: 'off' });
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'forkline-pty-echo-'));
 
-  try {
-    const cacheDir = path.join(tempRoot, '.agent_cache');
-    fs.mkdirSync(cacheDir, { recursive: true });
-    const scriptPath = path.join(cacheDir, 'launch_agent.sh');
-    fs.writeFileSync(scriptPath, '#!/usr/bin/env sh\nprintf "AGENT_SCRIPT_OK\\n"\n', { mode: 0o700 });
-    fs.chmodSync(scriptPath, 0o700);
+  return withMockedSpawn(() => createFakePtyProcess({ emitScriptEcho: true }), async () => {
+    try {
+      const cacheDir = path.join(tempRoot, '.agent_cache');
+      fs.mkdirSync(cacheDir, { recursive: true });
+      const scriptPath = path.join(cacheDir, 'launch_agent.sh');
+      fs.writeFileSync(scriptPath, '#!/usr/bin/env sh\nprintf "AGENT_SCRIPT_OK\\n"\n', { mode: 0o700 });
+      fs.chmodSync(scriptPath, 0o700);
 
-    const created = service.createSession('task-live-launch', tempRoot, {}, 'test');
-    assert.equal(created.created, true);
+      const created = service.createSession('task-live-launch', tempRoot, {}, 'test');
+      assert.equal(created.created, true);
 
-    let output = '';
-    service.on('data', ({ taskId, data }) => {
-      if (taskId !== 'task-live-launch') return;
-      output += data;
-    });
+      let output = '';
+      service.on('data', ({ taskId, data }) => {
+        if (taskId !== 'task-live-launch') return;
+        output += data;
+      });
 
-    await wait(220);
-    const launchResult = service.launch('task-live-launch', './.agent_cache/launch_agent.sh', { suppressEcho: true });
-    assert.equal(launchResult.success, true);
+      await wait(50);
+      const launchResult = service.launch('task-live-launch', './.agent_cache/launch_agent.sh', { suppressEcho: true });
+      assert.equal(launchResult.success, true);
 
-    await wait(1200);
-    assert.equal(output.includes('./.agent_cache/launch_agent.sh'), false);
-    assert.equal(output.includes('AGENT_SCRIPT_OK'), true);
-  } finally {
-    service.destroy('task-live-launch');
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  }
+      await wait(120);
+      assert.equal(output.includes('./.agent_cache/launch_agent.sh'), false);
+      assert.equal(output.includes('AGENT_SCRIPT_OK'), true);
+    } finally {
+      service.destroy('task-live-launch');
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
 });

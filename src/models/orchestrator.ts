@@ -14,6 +14,7 @@ export interface TaskTab {
   displayName?: string;
   tags?: string[];
   agent: string;
+  permissionMode?: 'default' | 'bypass';
   basePath: string;
   worktreePath?: string;
   parentBranch?: string;
@@ -31,6 +32,11 @@ export interface TaskStatus {
   hasCollision: boolean;
   isBlocked?: boolean;
   blockedReason?: string;
+}
+
+export interface ProjectCollisionSummary {
+  files: string[];
+  taskIds: string[];
 }
 
 export interface TaskUsage {

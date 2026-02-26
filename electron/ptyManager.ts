@@ -34,6 +34,7 @@ type PtyServiceInstance = {
     created: boolean;
     running: boolean;
     restarted?: boolean;
+    startError?: string;
     sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
   };
   attach: (taskId: string, subscriberId?: string) => {
@@ -49,6 +50,7 @@ type PtyServiceInstance = {
     running: boolean;
     exitCode: number | null;
     signal?: number;
+    startError?: string;
     sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
   } | null;
   detach: (taskId: string, subscriberId?: string) => void;
@@ -60,6 +62,7 @@ type PtyServiceInstance = {
     running: boolean;
     restarted: boolean;
     error?: string;
+    startError?: string;
     sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
   };
   destroy: (taskId: string) => { success: boolean };
@@ -78,6 +81,7 @@ type PtyServiceInstance = {
     lastActivityAt: number;
     exitCode: number | null;
     signal?: number;
+    startError?: string;
     bufferSize: number;
   }>;
   on: (event: string, listener: (...args: any[]) => void) => void;
@@ -204,6 +208,7 @@ export class PtyManager {
         created: !!state.created,
         running: state.running,
         restarted: !!state.restarted,
+        startError: typeof state.startError === 'string' ? state.startError : undefined,
         sandbox: existing?.sandbox ?? state.sandbox ?? null
       });
     });
@@ -312,10 +317,16 @@ export class PtyManager {
         created: false,
         running: !!existing?.running,
         restarted: true,
+        startError: existing?.startError ?? restarted.startError,
         sandbox: existing?.sandbox ?? restarted.sandbox ?? null
       });
 
-      return { success: true, running: !!existing?.running, restarted: true };
+      return {
+        success: true,
+        running: !!existing?.running,
+        restarted: true,
+        startError: existing?.startError ?? restarted.startError
+      };
     });
 
     ipcMain.on('pty:destroyAllForSender', (event) => {

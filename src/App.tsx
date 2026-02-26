@@ -152,13 +152,12 @@ function App() {
       taskStatuses,
       taskTodos,
       taskUsage,
-      collisions,
+      collisionsByProject,
       pendingApprovals,
       blockedTasks,
       approvalInboxCount,
       attentionEvents,
       livingSpecPreferences,
-      livingSpecCandidatesByProject,
       livingSpecSelectionPrompt
     },
     actions: {
@@ -186,6 +185,8 @@ function App() {
       rejectAllPendingRequests,
       respondToBlockedTask,
       respondToAllBlockedTasks,
+      dismissAttentionEvent,
+      refreshTaskStatuses,
       resolveLivingSpecSelectionPrompt,
       dismissLivingSpecSelectionPrompt,
       forgetProjectState
@@ -208,6 +209,8 @@ function App() {
   const [spawnProgress, setSpawnProgress] = useState<SpawnProgressState | null>(null);
   const [deleteDialog, setDeleteDialog] = useState<DeleteDialogState | null>(null);
   const [removeProjectDialog, setRemoveProjectDialog] = useState<RemoveProjectDialogState | null>(null);
+  const [showCollisionFixSteps, setShowCollisionFixSteps] = useState(false);
+  const [dismissedCollisionKeyByProject, setDismissedCollisionKeyByProject] = useState<Record<string, string>>({});
   const [theme, setTheme] = useState<string>(() => {
     const stored = safeLocalStorageGet(THEME_KEY) || '';
     return VALID_THEME_IDS.has(stored) ? stored : DEFAULT_THEME_ID;
@@ -485,7 +488,6 @@ function App() {
       return [tab];
     })
   ), [mountedTerminalTaskIds, tabsById]);
-  const activeProjectLivingSpecCandidates = livingSpecCandidatesByProject[normalizeProjectPath(basePath)] || [];
   const parentBranch = workspaceInfo.defaultBranch || workspaceInfo.currentBranch || 'main';
   const selectableBranches = Array.from(new Set([parentBranch, ...workspaceBranches].filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const sortedProjectPaths = useMemo(() => (
@@ -535,9 +537,32 @@ function App() {
     }
     return 'info';
   }, [operationNotice]);
-  const latestSpecDeviation = attentionEvents.find((event) => event.kind === 'spec_deviation');
-  const latestContextAlert = attentionEvents.find((event) => event.kind === 'context_alert');
-  const shouldShowNoticeStack = collisions.length > 0 || !!operationNotice || !!latestSpecDeviation || !!latestContextAlert;
+  const normalizedActiveProjectPath = normalizeProjectPath(basePath);
+  const activeProjectAttentionEvents = normalizedActiveProjectPath
+    ? attentionEvents.filter((event) => normalizeProjectPath(event.projectPath) === normalizedActiveProjectPath)
+    : attentionEvents;
+  const latestSpecDeviation = activeProjectAttentionEvents.find((event) => event.kind === 'spec_deviation');
+  const latestContextAlert = activeProjectAttentionEvents.find((event) => event.kind === 'context_alert');
+  const activeProjectCollisionSummary = normalizedActiveProjectPath
+    ? collisionsByProject[normalizedActiveProjectPath]
+    : undefined;
+  const activeProjectCollisions = activeProjectCollisionSummary?.files || [];
+  const activeProjectCollisionTaskNames = useMemo(
+    () => (activeProjectCollisionSummary?.taskIds || []).flatMap((taskId) => {
+      const tab = tabsById.get(taskId);
+      return tab ? [getTaskDisplayName(tab)] : [];
+    }),
+    [activeProjectCollisionSummary, tabsById]
+  );
+  const activeProjectCollisionKey = activeProjectCollisions.join('|');
+  const collisionBannerDismissed = !!normalizedActiveProjectPath
+    && dismissedCollisionKeyByProject[normalizedActiveProjectPath] === activeProjectCollisionKey;
+  const showCollisionBanner = activeProjectCollisions.length > 0 && !collisionBannerDismissed;
+  const shouldShowNoticeStack = showCollisionBanner || !!operationNotice || !!latestSpecDeviation || !!latestContextAlert;
+  useEffect(() => {
+    if (showCollisionBanner) return;
+    setShowCollisionFixSteps(false);
+  }, [showCollisionBanner, normalizedActiveProjectPath]);
   const headerAgentName = activeTask ? getTaskDisplayName(activeTask) : 'No active session';
   const headerPathHint = currentDirectoryLabel && currentDirectoryLabel !== '-' ? currentDirectoryLabel : (currentWorkingPath || basePath || '-');
   const paletteItems: CommandPaletteItem[] = [
@@ -794,13 +819,13 @@ function App() {
     options?: {
       createBaseBranchIfMissing?: boolean;
       dependencyCloneMode?: 'copy_on_write' | 'full_copy';
-      livingSpecOverridePath?: string;
       launchCommandOverride?: string;
+      permissionMode?: 'default' | 'bypass';
     }
-  ) => {
+  ): Promise<{ success: boolean; error?: string }> => {
     if (!basePath || !sourceStatus?.valid) {
       setOperationNotice('Please select a valid base project path first.');
-      return;
+      return { success: false, error: 'Please select a valid base project path first.' };
     }
 
     const trimmedTaskName = rawTaskName.trim() || 'new-session';
@@ -813,11 +838,11 @@ function App() {
       rawTaskName,
       agentCommand,
       prompt,
+      permissionMode: options?.permissionMode,
       launchCommandOverride: options?.launchCommandOverride,
       baseBranch,
       createBaseBranchIfMissing: options?.createBaseBranchIfMissing === true,
       dependencyCloneMode: options?.dependencyCloneMode,
-      livingSpecOverridePath: options?.livingSpecOverridePath,
       capabilities,
       activate: true
     });
@@ -825,7 +850,7 @@ function App() {
     if (!result.success) {
       setSpawnProgress(null);
       setOperationNotice(`Git worktree setup failed: ${result.error || 'unknown error'}.`);
-      return;
+      return { success: false, error: result.error || 'Git worktree setup failed.' };
     }
 
     setSpawnProgress({
@@ -833,6 +858,7 @@ function App() {
       taskId: result.taskId,
       phase: 'preparing_environment'
     });
+    return { success: true };
   };
 
   const handleMergeClick = useCallback((id: string) => {
@@ -1136,12 +1162,67 @@ function App() {
       <main className="flex-1 min-w-0 flex flex-col h-full relative z-10 pt-2 pr-2 pb-2">
         {shouldShowNoticeStack && (
           <div className="space-y-2 mb-2">
-            {collisions.length > 0 && (
-              <div className="h-10 bg-[#1a0505] border border-red-900 rounded-lg flex items-center justify-center z-40 text-xs font-semibold text-red-400 shadow-sm px-3">
-                <AlertTriangle size={14} className="mr-2 text-red-500 shrink-0" />
-                <span className="truncate">
-                  Collision Detected: Multiple agents modifying ({collisions.join(', ')}).
-                </span>
+            {showCollisionBanner && (
+              <div className="bg-[#1a0505] border border-red-900 rounded-lg z-40 text-red-300 shadow-sm px-3 py-2">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle size={14} className="mt-0.5 text-red-500 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-semibold">Collision detected in this project.</div>
+                    <div className="text-[11px] text-red-200/90 mt-0.5 truncate" title={activeProjectCollisions.join(', ')}>
+                      Files: {activeProjectCollisions.length > 4
+                        ? `${activeProjectCollisions.slice(0, 4).join(', ')} +${activeProjectCollisions.length - 4} more`
+                        : activeProjectCollisions.join(', ')}
+                    </div>
+                    {activeProjectCollisionTaskNames.length > 0 && (
+                      <div className="text-[11px] text-red-200/90 mt-0.5 truncate" title={activeProjectCollisionTaskNames.join(', ')}>
+                        Sessions: {activeProjectCollisionTaskNames.join(', ')}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        refreshTaskStatuses();
+                        setOperationNotice('Re-checking project collisions...');
+                      }}
+                      className="h-7 px-2 rounded border border-red-800/90 text-[10px] font-semibold text-red-200 hover:bg-[#2b1111]"
+                    >
+                      Re-check
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowCollisionFixSteps((prev) => !prev)}
+                      className="h-7 px-2 rounded border border-red-800/90 text-[10px] font-semibold text-red-200 hover:bg-[#2b1111]"
+                    >
+                      {showCollisionFixSteps ? 'Hide steps' : 'How to fix'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!normalizedActiveProjectPath) return;
+                        setDismissedCollisionKeyByProject((prev) => ({
+                          ...prev,
+                          [normalizedActiveProjectPath]: activeProjectCollisionKey
+                        }));
+                      }}
+                      className="h-7 px-2 rounded border border-red-800/90 text-[10px] font-semibold text-red-200 hover:bg-[#2b1111]"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+                {showCollisionFixSteps && (
+                  <div className="mt-2 pl-6 text-[11px] text-red-100 space-y-1">
+                    <p className="font-semibold">Resolution steps</p>
+                    <ol className="list-decimal pl-4 space-y-0.5">
+                      <li>Open one listed session and keep it as the source of truth for each colliding file.</li>
+                      <li>Merge or rebase sibling sessions, then resolve conflicts so each file has one final owner.</li>
+                      <li>Close stale sessions in this project rail if they are no longer needed.</li>
+                      <li>Click Re-check to refresh collision state for this project.</li>
+                    </ol>
+                  </div>
+                )}
               </div>
             )}
             {operationNotice && (
@@ -1164,7 +1245,14 @@ function App() {
                 type="button"
                 onClick={() => {
                   setActiveTab(latestSpecDeviation.taskId);
-                  setIsApprovalInboxOpen(true);
+                  const target = tabsById.get(latestSpecDeviation.taskId);
+                  if (target?.worktreePath) {
+                    setDiffTask(latestSpecDeviation.taskId);
+                    setDiffOpen(true);
+                  } else {
+                    setOperationNotice(`Spec deviation: ${latestSpecDeviation.reason}`);
+                  }
+                  dismissAttentionEvent(latestSpecDeviation.id);
                 }}
                 className="btn-warning w-full h-9 rounded-lg z-40 text-[11px] px-3"
               >
@@ -1176,7 +1264,14 @@ function App() {
                 type="button"
                 onClick={() => {
                   setActiveTab(latestContextAlert.taskId);
-                  setIsApprovalInboxOpen(true);
+                  const target = tabsById.get(latestContextAlert.taskId);
+                  if (target?.worktreePath) {
+                    setDiffTask(latestContextAlert.taskId);
+                    setDiffOpen(true);
+                  } else {
+                    setOperationNotice(`Context alert: ${latestContextAlert.reason}`);
+                  }
+                  dismissAttentionEvent(latestContextAlert.id);
                 }}
                 className="btn-info w-full h-9 rounded-lg z-40 text-[11px] px-3"
               >
@@ -1294,6 +1389,7 @@ function App() {
                         context={context}
                         envVars={envVars}
                         prompt={tab.prompt}
+                        permissionMode={tab.permissionMode}
                         launchCommandOverride={tab.launchCommandOverride}
                         isActive={tab.id === activeTask.id}
                         shouldBootstrap={tab.hasBootstrapped === false}
@@ -1452,11 +1548,8 @@ function App() {
         basePath={basePath}
         parentBranch={parentBranch}
         availableBranches={selectableBranches}
-        livingSpecCandidates={activeProjectLivingSpecCandidates}
         dependencyCloneMode={dependencyCloneMode}
-        onSubmit={(rawTaskName, agentCommand, prompt, baseBranch, capabilities, options) => {
-          void handleNewTaskSubmit(rawTaskName, agentCommand, prompt, baseBranch, capabilities, options);
-        }}
+        onSubmit={handleNewTaskSubmit}
         defaultCommand={defaultCommand}
         availableAgents={availableAgents}
       />

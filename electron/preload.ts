@@ -98,6 +98,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       created: boolean;
       running: boolean;
       restarted?: boolean;
+      startError?: string;
       sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
     }) => void
   ) => {
@@ -109,6 +110,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         created: boolean;
         running: boolean;
         restarted?: boolean;
+        startError?: string;
         sandbox?: { mode: string; active: boolean; warning?: string; denyNetwork?: boolean } | null;
       }
     ) => callback(data);

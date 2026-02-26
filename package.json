@@ -55,7 +55,6 @@
     "start": "npm run build && electron .",
     "pack": "node scripts/run-electron-builder.js --dir --publish never",
     "dist:local": "npm run build && node scripts/run-electron-builder.js --publish never",
-    "release:automate": "node scripts/release-automation.js",
     "release": "npm run build && node scripts/run-electron-builder.js --publish always",
     "prepack": "npm run build"
   },

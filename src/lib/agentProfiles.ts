@@ -9,10 +9,13 @@ export interface AgentLaunchPlan {
   command: string;
 }
 
+export type AgentPermissionMode = 'default' | 'bypass';
+
 const normalize = (value: string) => value.trim().toLowerCase();
 
 const profileFor = (id: string, label: string): AgentProfile => ({ id, label });
 const TELEMETRY_WRAPPED_PROFILES = new Set(['claude', 'gemini', 'amp', 'aider', 'codex']);
+const PERMISSION_BYPASS_PROFILES = new Set(['claude', 'gemini', 'amp', 'codex']);
 
 export const wrapCommandWithLifecycleMarkers = (command: string, providerId: string) => {
   const normalizedProvider = providerId.trim().toLowerCase();
@@ -33,12 +36,52 @@ export const resolveAgentProfile = (command: string): AgentProfile => {
   return profileFor('shell', 'Shell');
 };
 
+export const supportsAgentPermissionBypass = (command: string) => {
+  const profile = resolveAgentProfile(command);
+  return PERMISSION_BYPASS_PROFILES.has(profile.id);
+};
+
+export const applyAgentPermissionMode = (
+  command: string,
+  mode: AgentPermissionMode = 'default'
+) => {
+  const trimmedCommand = String(command || '').trim();
+  if (!trimmedCommand || mode !== 'bypass') return trimmedCommand;
+  const profile = resolveAgentProfile(trimmedCommand);
+
+  if (profile.id === 'claude') {
+    if (/\b--dangerously-skip-permissions\b/i.test(trimmedCommand)) return trimmedCommand;
+    if (/\b--permission-mode(?:=|\s+)bypassPermissions\b/i.test(trimmedCommand)) return trimmedCommand;
+    return `${trimmedCommand} --permission-mode bypassPermissions`;
+  }
+
+  if (profile.id === 'codex') {
+    if (/\b--dangerously-bypass-approvals-and-sandbox\b/i.test(trimmedCommand)) return trimmedCommand;
+    return `${trimmedCommand} --dangerously-bypass-approvals-and-sandbox`;
+  }
+
+  if (profile.id === 'gemini') {
+    if (/\b--yolo\b/i.test(trimmedCommand)) return trimmedCommand;
+    if (/\b--approval-mode(?:=|\s+)yolo\b/i.test(trimmedCommand)) return trimmedCommand;
+    return `${trimmedCommand} --approval-mode yolo`;
+  }
+
+  if (profile.id === 'amp') {
+    if (/\b--dangerously-allow-all\b/i.test(trimmedCommand)) return trimmedCommand;
+    return `${trimmedCommand} --dangerously-allow-all`;
+  }
+
+  return trimmedCommand;
+};
+
 export const buildAgentLaunchPlan = (
   agentCommand: string,
-  prompt: string | undefined
+  prompt: string | undefined,
+  options: { permissionMode?: AgentPermissionMode } = {}
 ): AgentLaunchPlan => {
   const profile = resolveAgentProfile(agentCommand);
-  let launchCommand = agentCommand;
+  const permissionMode = options.permissionMode === 'bypass' ? 'bypass' : 'default';
+  let launchCommand = applyAgentPermissionMode(agentCommand, permissionMode);
 
   if (prompt && prompt.trim()) {
     launchCommand = `${launchCommand} ${shellQuote(prompt)}`;
