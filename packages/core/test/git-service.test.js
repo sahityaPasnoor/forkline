@@ -108,3 +108,48 @@ test('GitService supports blocking/background dependency hydration modes', async
     removeDirSafe(`${basePath}-worktrees`);
   }
 });
+
+test('GitService.removeWorktree succeeds when base repository path is missing', async () => {
+  const service = new GitService();
+  const basePath = path.join(makeTempDir(), 'missing-base');
+  const worktreePath = `${basePath}-worktrees/task-missing`;
+
+  const result = await service.removeWorktree(basePath, 'task-missing', worktreePath, true);
+  assert.equal(result.success, true);
+  assert.equal(result.stale, true);
+  assert.ok(Array.isArray(result.warnings));
+  assert.ok(result.warnings.length > 0);
+});
+
+test('GitService.removeWorktree treats missing worktree directory as stale cleanup and deletes branch', async () => {
+  const service = new GitService();
+  const basePath = makeTempDir();
+  fs.writeFileSync(path.join(basePath, 'README.md'), '# stale cleanup test\n', 'utf8');
+
+  try {
+    const createResult = await service.createWorktree(basePath, 'task-stale', 'main', {
+      createBaseBranchIfMissing: true,
+      packageStoreStrategy: 'off',
+      dependencyCloneMode: 'copy_on_write'
+    });
+    assert.equal(createResult.success, true);
+    assert.ok(createResult.worktreePath);
+
+    removeDirSafe(createResult.worktreePath);
+    assert.equal(fs.existsSync(createResult.worktreePath), false);
+
+    const removeResult = await service.removeWorktree(basePath, 'task-stale', createResult.worktreePath, true);
+    assert.equal(removeResult.success, true);
+    if (removeResult.stale) {
+      assert.ok(Array.isArray(removeResult.warnings));
+      assert.ok(removeResult.warnings.length > 0);
+    }
+
+    const branches = await service.listBranches(basePath);
+    assert.equal(branches.success, true);
+    assert.equal(branches.branches.includes('task-stale'), false);
+  } finally {
+    removeDirSafe(basePath);
+    removeDirSafe(`${basePath}-worktrees`);
+  }
+});

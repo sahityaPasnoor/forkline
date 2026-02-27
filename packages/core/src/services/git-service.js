@@ -105,6 +105,32 @@ const commandExistsAsync = (command) => new Promise((resolve) => {
   child.on('exit', (code) => resolve(code === 0));
 });
 
+const errorMessage = (error) => String(error?.message || error || '').trim();
+
+const isMissingDirectorySimpleGitError = (error) => (
+  /cannot use simple-git on a directory that does not exist/i.test(errorMessage(error))
+);
+
+const isIgnorableWorktreeRemoveError = (error) => {
+  const message = errorMessage(error);
+  return (
+    /working tree .* not found/i.test(message)
+    || /is not a working tree/i.test(message)
+    || /no such file or directory/i.test(message)
+    || /does not exist/i.test(message)
+  );
+};
+
+const isIgnorableBranchDeleteError = (error) => {
+  const message = errorMessage(error);
+  return (
+    /branch .* not found/i.test(message)
+    || /not found/i.test(message)
+    || /unknown revision/i.test(message)
+    || /no such ref/i.test(message)
+  );
+};
+
 const isPathInside = (parentPath, targetPath) => {
   const parent = normalizePath(parentPath);
   const target = normalizePath(targetPath);
@@ -796,13 +822,71 @@ class GitService {
   }
 
   async removeWorktree(basePath, taskName, worktreePath, force) {
-    const git = simpleGit(basePath);
-    if (force) {
-      await git.raw(['worktree', 'remove', '-f', worktreePath]);
-    } else {
-      await git.raw(['worktree', 'remove', worktreePath]);
+    const safeBasePath = normalizePath(basePath);
+    const safeWorktreePath = normalizePath(worktreePath);
+    const warnings = [];
+    const baseExists = fs.existsSync(safeBasePath);
+
+    if (!baseExists) {
+      if (fs.existsSync(safeWorktreePath)) {
+        fs.rmSync(safeWorktreePath, { recursive: true, force: true });
+        warnings.push('Base repository path is missing. Removed worktree directory directly.');
+      } else {
+        warnings.push('Base repository path and worktree path are missing. Cleared stale task state.');
+      }
+      return { success: true, stale: true, warnings };
     }
-    await git.branch(['-D', taskName]);
+
+    let git;
+    try {
+      git = simpleGit(safeBasePath);
+    } catch (error) {
+      if (isMissingDirectorySimpleGitError(error)) {
+        if (fs.existsSync(safeWorktreePath)) {
+          fs.rmSync(safeWorktreePath, { recursive: true, force: true });
+          warnings.push('Base repository path became unavailable. Removed worktree directory directly.');
+        } else {
+          warnings.push('Repository path is unavailable and worktree is already missing. Cleared stale task state.');
+        }
+        return { success: true, stale: true, warnings };
+      }
+      throw error;
+    }
+
+    try {
+      if (force) {
+        await git.raw(['worktree', 'remove', '-f', safeWorktreePath]);
+      } else {
+        await git.raw(['worktree', 'remove', safeWorktreePath]);
+      }
+    } catch (error) {
+      if (isIgnorableWorktreeRemoveError(error)) {
+        warnings.push('Worktree path is already missing or detached from git metadata.');
+      } else {
+        throw error;
+      }
+    }
+
+    if (fs.existsSync(safeWorktreePath)) {
+      fs.rmSync(safeWorktreePath, { recursive: true, force: true });
+      if (!fs.existsSync(safeWorktreePath)) {
+        warnings.push('Removed orphaned worktree directory from disk.');
+      }
+    }
+
+    try {
+      await git.branch(['-D', taskName]);
+    } catch (error) {
+      if (isIgnorableBranchDeleteError(error)) {
+        warnings.push('Task branch was already missing.');
+      } else {
+        throw error;
+      }
+    }
+
+    if (warnings.length > 0) {
+      return { success: true, stale: true, warnings };
+    }
     return { success: true };
   }
 
