@@ -43,7 +43,8 @@ export default {
         {
           text: 'Architecture',
           items: [
-            { text: 'Overview', link: '/architecture/overview' }
+            { text: 'Overview', link: '/architecture/overview' },
+            { text: 'Deep Dive', link: '/architecture/deep-dive' }
           ]
         }
       ],
