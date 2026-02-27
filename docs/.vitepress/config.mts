@@ -20,6 +20,7 @@ export default {
   themeConfig: {
     logo: '/logo.svg',
     nav: [
+      { text: 'New System Setup', link: '/guide/new-system-setup' },
       { text: 'Getting Started', link: '/guide/getting-started' },
       { text: 'How To Use', link: '/guide/how-to-use' },
       { text: 'Project Dossier', link: '/guide/project-dossier' },
@@ -31,6 +32,7 @@ export default {
         {
           text: 'Guide',
           items: [
+            { text: 'New System Setup', link: '/guide/new-system-setup' },
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'How To Use', link: '/guide/how-to-use' },
             { text: 'Project Dossier', link: '/guide/project-dossier' }

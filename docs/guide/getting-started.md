@@ -81,6 +81,7 @@ curl -i -H "Authorization: Bearer $TOKEN" http://127.0.0.1:34600/v1/pty/sessions
 ```
 
 Next:
+- [New System Setup](/guide/new-system-setup)
 - [How To Use](/guide/how-to-use)
 - [Project Dossier](/guide/project-dossier)
 - [Architecture](/architecture/overview)
