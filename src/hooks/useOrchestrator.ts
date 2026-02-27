@@ -22,6 +22,12 @@ import type {
 } from '../models/orchestrator';
 
 type CloseAction = 'merge' | 'delete';
+interface CloseTaskResult {
+  success: boolean;
+  error?: string;
+  stale?: boolean;
+  warnings?: string[];
+}
 const SESSION_STORAGE_KEY = 'orchestrator.runtime.session';
 const ATTENTION_FEED_ENABLED = true;
 const DEFAULT_PROJECT_POLICY: ProjectPermissionPolicy = {
@@ -103,6 +109,12 @@ const fileExtension = (filePath: string) => {
   const idx = filePath.lastIndexOf('.');
   if (idx <= 0) return '';
   return filePath.slice(idx).toLowerCase();
+};
+
+const isMissingPathError = (value: unknown) => {
+  const message = typeof value === 'string' ? value : '';
+  if (!message) return false;
+  return /does not exist|directory that does not exist|no such file or directory|enoent/i.test(message);
 };
 
 const HIGH_IMPACT_FILE_PATTERNS = [
@@ -837,9 +849,29 @@ export const useOrchestrator = () => {
     });
   }, []);
 
-  const closeTaskById = useCallback(async (taskId: string, action: CloseAction) => {
+  const closeTaskById = useCallback(async (taskId: string, action: CloseAction): Promise<CloseTaskResult> => {
     const tabToClose = tabsRef.current.find(t => t.id === taskId);
     if (!tabToClose) return { success: false, error: 'Task not found' };
+
+    const completeStaleDelete = (reason: string) => {
+      void window.electronAPI.fleetMarkClosed(taskId, action);
+      void window.electronAPI.fleetRecordEvent(taskId, 'worktree_deleted', {
+        branch: tabToClose.name,
+        worktreePath: tabToClose.worktreePath,
+        staleCleanup: true,
+        reason
+      });
+      window.electronAPI.destroyPty(taskId);
+      removeTaskFromState(taskId);
+      return { success: true, stale: true, warnings: [reason] };
+    };
+
+    if (action === 'delete') {
+      const validation = await window.electronAPI.validateSource(tabToClose.basePath);
+      if (!validation.valid && isMissingPathError(validation.error)) {
+        return completeStaleDelete('Project path no longer exists; removed stale session.');
+      }
+    }
 
     if (!tabToClose.worktreePath) {
       window.electronAPI.destroyPty(taskId);
@@ -850,6 +882,10 @@ export const useOrchestrator = () => {
     const res = action === 'merge'
       ? await window.electronAPI.mergeWorktree(tabToClose.basePath, tabToClose.name, tabToClose.worktreePath)
       : await window.electronAPI.removeWorktree(tabToClose.basePath, tabToClose.name, tabToClose.worktreePath, true);
+
+    if (!res.success && action === 'delete' && isMissingPathError(res.error)) {
+      return completeStaleDelete('Project/worktree path is missing; removed stale session.');
+    }
 
     if (res.success) {
       void window.electronAPI.fleetMarkClosed(taskId, action);
