@@ -103,3 +103,5 @@ flowchart LR
 - Token auth checks in both servers.
 - Browser-origin request rejection in both servers.
 - Request and PTY payload limits enforced in server/service layers.
+
+For full requirements, ideology, and implementation tradeoffs, see [Architecture Deep Dive](/architecture/deep-dive).

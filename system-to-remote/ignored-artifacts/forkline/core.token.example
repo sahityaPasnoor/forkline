@@ -1,0 +1,6 @@
+# Example only. Do not commit real token values.
+# Use either:
+# 1) generated file at ~/.forkline/core.token
+# 2) env var: FORKLINE_CORE_TOKEN
+
+YOUR_TOKEN_HERE

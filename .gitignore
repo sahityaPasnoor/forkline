@@ -36,3 +36,7 @@ playwright-report/
 .agent_cache/
 documents/private/
 AGENTS.md
+
+# Exported ignored artifacts (intentionally tracked for remote sharing)
+!system-to-remote/
+!system-to-remote/**

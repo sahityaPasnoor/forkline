@@ -1,0 +1,8 @@
+version: 1.0.0
+files:
+  - url: Forkline-1.0.0-mac-arm64.dmg
+    sha512: 054QH7Zeq16k1i9ALbtHH9DOzMrBnLXllw9DfnBQzSOsBG3Vxw7XIvsSmPZ8cqHYANseTym+dT/zk9rH2GgEIA==
+    size: 114710457
+path: Forkline-1.0.0-mac-arm64.dmg
+sha512: 054QH7Zeq16k1i9ALbtHH9DOzMrBnLXllw9DfnBQzSOsBG3Vxw7XIvsSmPZ8cqHYANseTym+dT/zk9rH2GgEIA==
+releaseDate: '2026-02-27T02:25:18.000Z'

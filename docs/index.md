@@ -88,6 +88,7 @@ forkline
 
 ## Start Here
 
+- New machine setup: [/guide/new-system-setup](/guide/new-system-setup)
 - Install and run: [/guide/getting-started](/guide/getting-started)
 - Daily workflow: [/guide/how-to-use](/guide/how-to-use)
 - Full technical dossier: [/guide/project-dossier](/guide/project-dossier)
